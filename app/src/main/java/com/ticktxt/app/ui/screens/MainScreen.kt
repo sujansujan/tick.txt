@@ -46,7 +46,6 @@ fun MainScreen(
     var tasks by remember { mutableStateOf(initialTasks) }
     var activeTab by remember { mutableStateOf("todo.txt") }
     var activeFilter by remember { mutableStateOf("all") }
-    var searchQuery by remember { mutableStateOf("") }
     var smartInput by remember { mutableStateOf("") }
     var disabledSpans by remember { mutableStateOf(setOf<String>()) }
     var storageFolderPath by remember { mutableStateOf("/storage/emulated/0/sync/tick/") }
@@ -58,19 +57,16 @@ fun MainScreen(
         else SmartAddParser.parse(smartInput, now, rules, disabledSpans)
     }
 
-    val filteredTasks = remember(tasks, activeFilter, searchQuery) {
+    val filteredTasks = remember(tasks, activeFilter) {
         tasks.filter { task ->
             if (task.isBlankOrComment) return@filter false
-            val matchesFilter = when {
+            when {
                 activeFilter == "open" -> !task.isCompleted
                 activeFilter == "due" -> !task.isCompleted && task.dueDate != null
                 activeFilter.startsWith("+") -> task.projects.contains(activeFilter.drop(1))
                 activeFilter.startsWith("@") -> task.contexts.contains(activeFilter.drop(1))
                 else -> true
             }
-            val matchesSearch = searchQuery.isBlank() ||
-                task.rawLine.contains(searchQuery.trim(), ignoreCase = true)
-            matchesFilter && matchesSearch
         }
     }
 
@@ -111,7 +107,6 @@ fun MainScreen(
 
         when (activeTab) {
             "todo.txt" -> {
-                // Simple filter strip
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -130,7 +125,6 @@ fun MainScreen(
                     }
                 }
 
-                // Task list body
                 LazyColumn(
                     modifier = Modifier
                         .weight(1f)
@@ -165,7 +159,6 @@ fun MainScreen(
                     }
                 }
 
-                // Live Smart-Add Preview (only shown while typing)
                 if (parsePreview != null) {
                     Column(
                         modifier = Modifier
@@ -198,7 +191,6 @@ fun MainScreen(
                     }
                 }
 
-                // Bottom One-Handed Capture Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

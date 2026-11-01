@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="512" height="512">
+  <!-- Safe zone 66x66 centered at (54,54): single-color silhouette -->
+  <path d="M39 31 L46.5 29.5 L46.5 42 L58.5 42 L58.5 48.5 L46.5 48.5 L46.5 67.5 L56.5 67.5 L55.5 75 L41.5 75 L38.5 71.5 L38.5 48.5 L31.5 48.5 L32.5 42 L38.5 42 Z" fill="#000000"/>
+  <path d="M63 57 L76.5 57 L76.5 75 L62.5 75 Z" fill="#000000"/>
+</svg>

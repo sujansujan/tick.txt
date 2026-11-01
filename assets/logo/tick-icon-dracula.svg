@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="512" height="512">
+  <!-- Background: Dracula Background #282A36 -->
+  <rect width="24" height="24" fill="#282A36"/>
+  <!-- Hand-authored letterpress lowercase 't': slight top-left chamfer & notched left crossbar, #F8F8F2 -->
+  <path d="M7 4.5 L9.5 4 L9.5 8 L13.5 8 L13.5 10.2 L9.5 10.2 L9.5 16.5 L12.8 16.5 L12.5 19 L7.8 19 L6.8 17.8 L6.8 10.2 L4.5 10.2 L4.8 8 L6.8 8 Z" fill="#F8F8F2"/>
+  <!-- Solid terminal block cursor at baseline right, Dracula Purple #BD93F9 -->
+  <path d="M15 13 L19.5 13 L19.5 19 L14.8 19 Z" fill="#BD93F9"/>
+</svg>

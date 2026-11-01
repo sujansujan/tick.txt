@@ -1,0 +1,25 @@
+# tick.rules.txt — plain text, human-editable rules for tick.txt
+# Edit by hand or let tick.txt append rules when you correct a smart-add chip.
+
+[defaults]
+timed_reminder = -15m/n
+date_only_reminder = 09:00/n
+morning = 09:00
+afternoon = 14:00
+evening = 19:00
+tonight = 20:00
+after_lunch = 13:00
+snooze_presets = 5m, 15m, 1h, tomorrow_morning
+max_snoozes = 5
+
+[projects]
+mum, mom, dad, sister, brother, parents, family -> +family
+invoice, client, standup, deploy, sprint -> +work
+milk, bread, eggs, groceries -> +groceries
+dentist, doctor, gym -> +health
+
+[contexts]
+"at home" -> @home
+"at the office", "in the office", "at work" -> @office
+"at the shop", "at the store" -> @errands
+"on phone", "by phone", "on a call" -> @phone

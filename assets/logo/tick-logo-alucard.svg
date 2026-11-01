@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 48" width="720" height="144">
+  <rect width="240" height="48" fill="#FFFBEB"/>
+  <!-- Left Mark (2x scale of 24x24 grid) -->
+  <g transform="translate(8, 0) scale(2)">
+    <path d="M7 4.5 L9.5 4 L9.5 8 L13.5 8 L13.5 10.2 L9.5 10.2 L9.5 16.5 L12.8 16.5 L12.5 19 L7.8 19 L6.8 17.8 L6.8 10.2 L4.5 10.2 L4.8 8 L6.8 8 Z" fill="#1F1F1F"/>
+    <path d="M15 13 L19.5 13 L19.5 19 L14.8 19 Z" fill="#644AC9"/>
+  </g>
+  <!-- Plain Monospace Wordmark: tick.txt -->
+  <text x="64" y="33" font-family="ui-monospace, 'JetBrains Mono', 'Fira Code', monospace" font-size="26" font-weight="600" letter-spacing="0.5" fill="#1F1F1F">tick.txt</text>
+</svg>

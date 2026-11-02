@@ -44,8 +44,7 @@ import java.time.format.DateTimeFormatter
 
 /**
  * Native Compose Full-Width ASCII Box Components (`+---...---+` and `| ... |`).
- * Uses `Row(Modifier.fillMaxWidth())` + `Modifier.weight(1f)` + `TextOverflow.Clip` (`softWrap = false`)
- * so every box fits 100% of the screen width on ANY phone and NEVER wraps `+---+` or `|` onto a new line.
+ * All options, toggles, and actions live INSIDE the box with ASCII icons (`[*]`, `[!]`, `[~]`, `[#]`, `[/]`).
  */
 @Composable
 fun AsciiHorizontalBorder(
@@ -95,10 +94,15 @@ fun AsciiBoxLeftRightRow(
     borderColor: Color = LocalTickPalette.current.fgMuted,
     fontSizeSp: Int = 14,
     boldLeft: Boolean = false,
-    boldRight: Boolean = false
+    boldRight: Boolean = false,
+    underlineRight: Boolean = false,
+    onClick: (() -> Unit)? = null
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
+            .padding(vertical = if (onClick != null) 3.dp else 1.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -114,7 +118,7 @@ fun AsciiBoxLeftRightRow(
             color = leftColor,
             fontSize = fontSizeSp.sp,
             fontWeight = if (boldLeft) FontWeight.Bold else FontWeight.Normal,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = LocalTickFontFamily.current,
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
@@ -127,7 +131,8 @@ fun AsciiBoxLeftRightRow(
                 color = rightColor,
                 fontSize = (fontSizeSp - 1).coerceAtLeast(11).sp,
                 fontWeight = if (boldRight) FontWeight.Bold else FontWeight.Normal,
-                fontFamily = FontFamily.Monospace,
+                textDecoration = if (underlineRight) TextDecoration.Underline else TextDecoration.None,
+                fontFamily = LocalTickFontFamily.current,
                 maxLines = 1,
                 softWrap = false
             )
@@ -150,10 +155,14 @@ fun AsciiBoxBodyRow(
     borderColor: Color = LocalTickPalette.current.fgMuted,
     fontSizeSp: Int = 15,
     bold: Boolean = false,
-    strikethrough: Boolean = false
+    strikethrough: Boolean = false,
+    onClick: (() -> Unit)? = null
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
+            .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -169,10 +178,137 @@ fun AsciiBoxBodyRow(
             color = textColor,
             fontSize = fontSizeSp.sp,
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = LocalTickFontFamily.current,
             textDecoration = if (strikethrough) TextDecoration.LineThrough else TextDecoration.None,
             modifier = Modifier.weight(1f)
         )
+        Text(
+            text = " |",
+            color = borderColor,
+            fontSize = 13.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+    }
+}
+
+/**
+ * Renders an interactive option selector row strictly INSIDE the `+---...---+` box:
+ * `| Label :  [*Opt1*]   Opt2   Opt3               |`
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun <T> AsciiBoxOptionRow(
+    label: String,
+    options: List<Pair<T, String>>,
+    selectedValue: T,
+    onSelect: (T) -> Unit,
+    activeColor: Color = LocalTickPalette.current.project,
+    borderColor: Color = LocalTickPalette.current.fgMuted,
+    fontSizeSp: Int = 14
+) {
+    val palette = LocalTickPalette.current
+    val appFont = LocalTickFontFamily.current
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "| ",
+            color = borderColor,
+            fontSize = 13.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        FlowRow(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            if (label.isNotEmpty()) {
+                Text(
+                    text = "$label:",
+                    color = palette.fgMuted,
+                    fontSize = (fontSizeSp - 1).sp,
+                    fontFamily = appFont,
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+            }
+            options.forEach { (value, text) ->
+                val isSelected = value == selectedValue
+                Text(
+                    text = if (isSelected) "[*$text*]" else text,
+                    color = if (isSelected) activeColor else palette.fg,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    fontSize = (fontSizeSp - 1).sp,
+                    fontFamily = appFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable { onSelect(value) }
+                        .padding(vertical = 4.dp, horizontal = 2.dp)
+                )
+            }
+        }
+        Text(
+            text = " |",
+            color = borderColor,
+            fontSize = 13.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+    }
+}
+
+/**
+ * Renders an evenly distributed row of ASCII action triggers strictly INSIDE the `+---...---+` box:
+ * `| [x] Done    [~] Snooze    [!] Alarm    [+] GCal |`
+ */
+@Composable
+fun AsciiBoxActionRow(
+    actions: List<Triple<String, Color, () -> Unit>>,
+    borderColor: Color = LocalTickPalette.current.fgMuted,
+    fontSizeSp: Int = 13
+) {
+    val appFont = LocalTickFontFamily.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "| ",
+            color = borderColor,
+            fontSize = 13.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        Row(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            actions.forEach { (label, color, onClick) ->
+                Text(
+                    text = label,
+                    color = color,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = fontSizeSp.sp,
+                    fontFamily = appFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable { onClick() }
+                        .padding(vertical = 4.dp, horizontal = 2.dp)
+                )
+            }
+        }
         Text(
             text = " |",
             color = borderColor,
@@ -202,13 +338,6 @@ object PlainTextSportsAscii {
     ).joinToString("\n")
 }
 
-/**
- * Shared audio controller that enforces:
- * - When Alarm is Muted (default): loud alarm (`TYPE_ALARM`) is silent, and only the standard
- *   system notification sound (`TYPE_NOTIFICATION`) plays.
- * - When Alarm is Unmuted: system notification sound is immediately silenced, and the loud
- *   alarm (`TYPE_ALARM`) + vibration plays.
- */
 object AlarmAudioController {
     private var loudAlarmRingtone: Ringtone? = null
     private var notifRingtone: Ringtone? = null
@@ -392,7 +521,6 @@ class FullScreenAlarmActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AsciiFullScreenAlarmSurface(
     taskTitle: String,
@@ -406,7 +534,6 @@ fun AsciiFullScreenAlarmSurface(
 ) {
     val context = LocalContext.current
     val palette = LocalTickPalette.current
-    val appFont = LocalTickFontFamily.current
 
     var selectedUnit by remember { mutableStateOf(SnoozeUnit.MINUTES) }
     var snoozeAmount by remember { mutableStateOf(5) }
@@ -443,42 +570,8 @@ fun AsciiFullScreenAlarmSurface(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Top bar: Clock on left, Audio Mode toggle on right
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Triggered: $clockFormatted",
-                color = palette.fgMuted,
-                fontSize = (fontSizeSp - 2).sp,
-                fontFamily = appFont
-            )
-            Text(
-                text = if (isAlarmMuted) "Muted (Notif Sound) • Unmute" else "Loud Alarm (Notif Silenced) • Mute",
-                color = if (isAlarmMuted) palette.reminder else palette.priorityA,
-                fontWeight = FontWeight.Bold,
-                fontSize = (fontSizeSp - 2).sp,
-                fontFamily = appFont,
-                textDecoration = TextDecoration.Underline,
-                modifier = Modifier
-                    .clickable {
-                        val nextMuted = !isAlarmMuted
-                        isAlarmMuted = nextMuted
-                        onToggleAlarmMute(nextMuted)
-                        if (nextMuted) {
-                            AlarmAudioController.playSystemNotificationBeepOnce(context)
-                        } else {
-                            AlarmAudioController.applyAudioMode(context, isAlarmMuted = false)
-                        }
-                    }
-                    .padding(vertical = 8.dp)
-            )
-        }
-
         // Centered ASCII Bell Art
         Text(
             text = PlainTextSportsAscii.ALARM_BELL_ART,
@@ -490,223 +583,103 @@ fun AsciiFullScreenAlarmSurface(
             modifier = Modifier.fillMaxWidth()
         )
 
-        // Native Full-Width Task Scorecard Box (Never wraps!)
+        // Single Unified Full-Width ASCII Alarm & Snooze Box (Everything inside the box!)
         Column(modifier = Modifier.fillMaxWidth()) {
             AsciiHorizontalBorder()
             AsciiBoxLeftRightRow(
-                left = "TASK ALARM",
+                left = "[!] TASK ALARM ($clockFormatted)",
                 right = "rem:$rawSpec",
                 leftColor = palette.priorityA,
                 rightColor = palette.reminder,
+                fontSizeSp = fontSizeSp,
                 boldLeft = true
-            )
-            AsciiBoxLeftRightRow(
-                left = "AUDIO",
-                right = if (isAlarmMuted) "Muted (Notif Sound)" else "Loud (Notif Silenced)",
-                leftColor = palette.fgMuted,
-                rightColor = if (isAlarmMuted) palette.reminder else palette.priorityA
             )
             AsciiHorizontalBorder(corner = "|")
             AsciiBoxBodyRow(
-                text = taskTitle,
+                text = ">> $taskTitle",
                 textColor = palette.fg,
-                fontSizeSp = fontSizeSp,
+                fontSizeSp = fontSizeSp + 2,
                 bold = true
             )
+            AsciiHorizontalBorder(corner = "|")
+            AsciiBoxOptionRow(
+                label = "[~] Audio",
+                options = listOf(
+                    true to "Muted (Notif)",
+                    false to "Loud (No Notif)"
+                ),
+                selectedValue = isAlarmMuted,
+                onSelect = { nextMuted ->
+                    isAlarmMuted = nextMuted
+                    onToggleAlarmMute(nextMuted)
+                    if (nextMuted) {
+                        AlarmAudioController.playSystemNotificationBeepOnce(context)
+                    } else {
+                        AlarmAudioController.applyAudioMode(context, isAlarmMuted = false)
+                    }
+                },
+                activeColor = if (isAlarmMuted) palette.reminder else palette.priorityA,
+                fontSizeSp = fontSizeSp
+            )
+            AsciiHorizontalBorder(corner = "|")
+            AsciiBoxOptionRow(
+                label = "[~] Unit",
+                options = SnoozeUnit.entries.map { it to it.asciiLabel.lowercase() },
+                selectedValue = selectedUnit,
+                onSelect = { u ->
+                    selectedUnit = u
+                    if (snoozeAmount !in u.quickValues) {
+                        snoozeAmount = u.quickValues.first()
+                    }
+                },
+                activeColor = palette.project,
+                fontSizeSp = fontSizeSp
+            )
+            AsciiBoxActionRow(
+                actions = listOf(
+                    Triple("<-1>", palette.project) { snoozeAmount = (snoozeAmount - 1).coerceAtLeast(1) },
+                    Triple("$snoozeAmount ${selectedUnit.asciiLabel.lowercase()}", palette.fg) {},
+                    Triple("<+1>", palette.project) { snoozeAmount = (snoozeAmount + 1).coerceAtMost(365) }
+                ),
+                fontSizeSp = fontSizeSp
+            )
+            AsciiBoxOptionRow(
+                label = "[+] Step",
+                options = selectedUnit.quickValues.map { it to "+$it${selectedUnit.code}" },
+                selectedValue = snoozeAmount,
+                onSelect = { snoozeAmount = it },
+                activeColor = palette.priorityB,
+                fontSizeSp = fontSizeSp
+            )
+            AsciiBoxOptionRow(
+                label = "[>] Quick",
+                options = listOf("10s", "30s", "1m", "5m", "15m", "1h", "1d", "1w", "1mo").map { it to "+$it" },
+                selectedValue = "",
+                onSelect = { onSnoozeWithPreset(it) },
+                activeColor = palette.contextTag,
+                fontSizeSp = fontSizeSp
+            )
+            AsciiHorizontalBorder(corner = "|")
+            AsciiBoxLeftRightRow(
+                left = "[~] Snooze +$snoozeAmount${selectedUnit.code} ($previewFormatted)",
+                right = "[Apply >]",
+                leftColor = palette.reminder,
+                rightColor = palette.reminder,
+                fontSizeSp = fontSizeSp,
+                boldLeft = true,
+                boldRight = true,
+                underlineRight = true,
+                onClick = { onSnoozeWithPreset(selectedUnit.toPresetSpec(snoozeAmount)) }
+            )
+            AsciiHorizontalBorder(corner = "|")
+            AsciiBoxActionRow(
+                actions = listOf(
+                    Triple("[x] Complete Task", palette.reminder) { onMarkDone() },
+                    Triple("[X] Dismiss Alarm", palette.fgMuted) { onDismiss() }
+                ),
+                fontSizeSp = fontSizeSp
+            )
             AsciiHorizontalBorder()
-        }
-
-        // Primary Action Links distributed cleanly
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "[x] Mark Completed",
-                color = palette.reminder,
-                fontWeight = FontWeight.Bold,
-                fontSize = fontSizeSp.sp,
-                fontFamily = appFont,
-                textDecoration = TextDecoration.Underline,
-                modifier = Modifier
-                    .clickable { onMarkDone() }
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
-            )
-            Text(
-                text = "Dismiss Alarm",
-                color = palette.fgMuted,
-                fontSize = fontSizeSp.sp,
-                fontFamily = appFont,
-                textDecoration = TextDecoration.Underline,
-                modifier = Modifier
-                    .clickable { onDismiss() }
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
-            )
-        }
-
-        // Granular Snooze Section
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = "Snooze Task",
-                color = palette.fg,
-                fontWeight = FontWeight.Bold,
-                fontSize = fontSizeSp.sp,
-                fontFamily = appFont
-            )
-
-            // Wrapping Unit Links: sec  min  hr  day  wk  mo
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = "Units: ",
-                    color = palette.fgMuted,
-                    fontSize = (fontSizeSp - 1).sp,
-                    fontFamily = appFont,
-                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)
-                )
-                SnoozeUnit.entries.forEach { unit ->
-                    val isSel = selectedUnit == unit
-                    Text(
-                        text = unit.asciiLabel.lowercase(),
-                        color = if (isSel) palette.project else palette.fg,
-                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                        fontSize = fontSizeSp.sp,
-                        fontFamily = appFont,
-                        textDecoration = TextDecoration.Underline,
-                        modifier = Modifier
-                            .clickable {
-                                selectedUnit = unit
-                                if (snoozeAmount !in unit.quickValues) {
-                                    snoozeAmount = unit.quickValues.first()
-                                }
-                            }
-                            .padding(horizontal = 10.dp, vertical = 8.dp)
-                    )
-                }
-            }
-
-            // PlainTextSports Angle-Bracket Stepper: < - 1     5 minutes     + 1 >
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "< - 1",
-                    color = palette.project,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = fontSizeSp.sp,
-                    fontFamily = appFont,
-                    textDecoration = TextDecoration.Underline,
-                    modifier = Modifier
-                        .clickable { snoozeAmount = (snoozeAmount - 1).coerceAtLeast(1) }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                )
-
-                Text(
-                    text = "$snoozeAmount ${selectedUnit.fullName.lowercase()}",
-                    color = palette.fg,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = fontSizeSp.sp,
-                    fontFamily = appFont
-                )
-
-                Text(
-                    text = "+ 1 >",
-                    color = palette.project,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = fontSizeSp.sp,
-                    fontFamily = appFont,
-                    textDecoration = TextDecoration.Underline,
-                    modifier = Modifier
-                        .clickable { snoozeAmount = (snoozeAmount + 1).coerceAtMost(365) }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                )
-            }
-
-            // Quick values for current unit
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                selectedUnit.quickValues.forEach { qv ->
-                    val isSel = snoozeAmount == qv
-                    Text(
-                        text = "+$qv${selectedUnit.code}",
-                        color = if (isSel) palette.priorityB else palette.fgMuted,
-                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                        fontSize = (fontSizeSp - 1).sp,
-                        fontFamily = appFont,
-                        textDecoration = TextDecoration.Underline,
-                        modifier = Modifier
-                            .clickable { snoozeAmount = qv }
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    )
-                }
-            }
-
-            // Native Full-Width Snooze Scorecard Box (Never wraps!)
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSnoozeWithPreset(selectedUnit.toPresetSpec(snoozeAmount)) }
-                    .padding(vertical = 4.dp)
-            ) {
-                AsciiHorizontalBorder(color = palette.reminder)
-                AsciiBoxLeftRightRow(
-                    left = "Snooze +$snoozeAmount ${selectedUnit.asciiLabel.lowercase()}",
-                    right = "Apply Snooze >",
-                    leftColor = palette.reminder,
-                    rightColor = palette.reminder,
-                    borderColor = palette.reminder,
-                    boldLeft = true,
-                    boldRight = true
-                )
-                AsciiBoxLeftRightRow(
-                    left = "Wake Time",
-                    right = previewFormatted,
-                    leftColor = palette.fgMuted,
-                    rightColor = palette.fg,
-                    borderColor = palette.reminder
-                )
-                AsciiHorizontalBorder(color = palette.reminder)
-            }
-
-            // 1-Tap Cross-Unit Underlined Links
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = "Quick: ",
-                    color = palette.fgMuted,
-                    fontSize = (fontSizeSp - 2).sp,
-                    fontFamily = appFont,
-                    modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp)
-                )
-                listOf("10s", "30s", "1m", "5m", "15m", "1h", "1d", "1w", "1mo").forEach { spec ->
-                    Text(
-                        text = "+$spec",
-                        color = palette.contextTag,
-                        fontSize = (fontSizeSp - 1).sp,
-                        fontFamily = appFont,
-                        textDecoration = TextDecoration.Underline,
-                        modifier = Modifier
-                            .clickable { onSnoozeWithPreset(spec) }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                    )
-                }
-            }
         }
     }
 }

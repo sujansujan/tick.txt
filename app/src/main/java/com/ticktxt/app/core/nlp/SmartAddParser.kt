@@ -420,10 +420,11 @@ object SmartAddParser {
                             inferredDueTime = tLocal
                             hasImmediateRelativeOffset = true
                             exactOffsetMillis = when {
-                                unit.startsWith("s") -> (amount * 1000.0).roundToLong().coerceAtLeast(5000L)
+                                unit.startsWith("s") -> (amount * 1000.0).roundToLong().coerceAtLeast(1000L)
                                 unit in setOf("m", "min", "mins", "minute", "minutes") -> (amount * 60_000.0).roundToLong()
                                 unit.startsWith("h") -> (amount * 3_600_000.0).roundToLong()
                                 unit.startsWith("d") -> (amount * 86_400_000.0).roundToLong()
+                                unit.startsWith("w") -> (amount * 604_800_000.0).roundToLong()
                                 else -> null
                             }
                         }

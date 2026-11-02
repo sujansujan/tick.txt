@@ -6,7 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.PowerManager
-import com.ticktxt.app.MainActivity
+import com.ticktxt.app.ui.screens.FullScreenAlarmActivity
 
 data class PermissionDiagnostics(
     val canScheduleExactAlarms: Boolean,
@@ -18,8 +18,8 @@ data class PermissionDiagnostics(
 
 /**
  * Schedules exact Android alarms that fire reliably even in Doze mode.
- * Also supports direct millisecond delay scheduling (`scheduleExactAfterMillis`)
- * so "in 1m", "in 1 hr", "in 1.5 hrs" fire at the exact target second.
+ * Uses `AlarmManager.setAlarmClock(...)` with `FullScreenAlarmActivity` as the showIntent
+ * so every task reminder wakes the screen and displays the Full-Screen ASCII Alarm + Notification.
  */
 class ReminderScheduler(private val context: Context) {
 
@@ -81,10 +81,16 @@ class ReminderScheduler(private val context: Context) {
                 val showIntent = PendingIntent.getActivity(
                     context,
                     requestCode,
-                    Intent(context, MainActivity::class.java),
+                    Intent(context, FullScreenAlarmActivity::class.java).apply {
+                        putExtra(EXTRA_REMINDER_ID, reminderId)
+                        putExtra(EXTRA_TASK_ID, taskStableId)
+                        putExtra(EXTRA_RAW_SPEC, rawSpec)
+                        putExtra(EXTRA_TASK_TITLE, taskDescription)
+                        putExtra(EXTRA_REMINDER_TYPE, typeCode)
+                    },
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
-                // setAlarmClock is never throttled by Doze and guarantees exact delivery
+                // setAlarmClock is never throttled by Doze and guarantees exact second-level delivery
                 val clockInfo = AlarmManager.AlarmClockInfo(safeTriggerMs, showIntent)
                 alarmManager.setAlarmClock(clockInfo, pendingIntent)
             } else {
@@ -98,17 +104,23 @@ class ReminderScheduler(private val context: Context) {
             alarmManager.setWindow(
                 AlarmManager.RTC_WAKEUP,
                 safeTriggerMs,
-                5_000L,
+                2_000L,
                 pendingIntent
             )
         }
     }
 
-    fun fireImmediateNotification(taskTitle: String, rawSpec: String = "0m/n", typeCode: String = "n") {
+    fun fireImmediateNotification(
+        taskTitle: String,
+        rawSpec: String = "0m/a",
+        typeCode: String = "a",
+        taskId: String = "immediate"
+    ) {
+        val remId = "$taskId|$rawSpec"
         val intent = Intent(context, AlarmBroadcastReceiver::class.java).apply {
             action = ACTION_FIRE_REMINDER
-            putExtra(EXTRA_REMINDER_ID, "immediate_${System.currentTimeMillis()}")
-            putExtra(EXTRA_TASK_ID, "immediate")
+            putExtra(EXTRA_REMINDER_ID, remId)
+            putExtra(EXTRA_TASK_ID, taskId)
             putExtra(EXTRA_RAW_SPEC, rawSpec)
             putExtra(EXTRA_TASK_TITLE, taskTitle)
             putExtra(EXTRA_REMINDER_TYPE, typeCode)
@@ -138,6 +150,7 @@ class ReminderScheduler(private val context: Context) {
         const val ACTION_DISMISS_REMINDER = "com.ticktxt.app.ACTION_DISMISS_REMINDER"
         const val ACTION_MARK_DONE = "com.ticktxt.app.ACTION_MARK_DONE"
         const val ACTION_TASKS_UPDATED = "com.ticktxt.app.ACTION_TASKS_UPDATED"
+        const val ACTION_ALARM_FIRED_UI = "com.ticktxt.app.ACTION_ALARM_FIRED_UI"
 
         const val EXTRA_REMINDER_ID = "extra_reminder_id"
         const val EXTRA_TASK_ID = "extra_task_id"

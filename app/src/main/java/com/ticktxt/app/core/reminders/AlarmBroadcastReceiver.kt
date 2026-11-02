@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
 import android.media.RingtoneManager
 import androidx.core.app.NotificationCompat
 import com.ticktxt.app.MainActivity
@@ -15,12 +16,13 @@ import com.ticktxt.app.ui.screens.FullScreenAlarmActivity
 import java.io.File
 import java.time.LocalDate
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 /**
- * First-class Android NotificationCompat receiver:
- * - Creates high-importance notification channel with sound, vibration, and lockscreen visibility
- * - Provides quick-snooze buttons (+5m, +15m) and a working "Mark Done" button that
- *   updates `todo.txt` on disk and notifies the UI.
+ * First-class Android NotificationCompat & Full-Screen Alarm receiver:
+ * - Creates a MAX-importance alarm channel with alarm audio attributes, vibration, and lockscreen visibility
+ * - Fires BOTH an ASCII-formatted system notification AND launches `FullScreenAlarmActivity`
+ *   so every task reminder wakes the screen with full-screen ASCII alarm + granular snooze (sec/min/hr/day/wk/mo).
  */
 class AlarmBroadcastReceiver : BroadcastReceiver() {
 
@@ -30,9 +32,9 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
 
         val reminderId = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_ID) ?: "default_id"
         val taskId = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_ID) ?: "task_id"
-        val rawSpec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC) ?: "0m/n"
-        val taskTitle = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE) ?: "tick.txt reminder"
-        val remType = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_TYPE) ?: "n"
+        val rawSpec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC) ?: "0m/a"
+        val taskTitle = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE) ?: "tick.txt task alarm"
+        val remType = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_TYPE) ?: "a"
         val notifId = (reminderId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100)
 
         val repo = TickStorageRepository(context)
@@ -43,22 +45,34 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
             ReminderScheduler.ACTION_FIRE_REMINDER -> {
                 snoozeStore.recordFired(taskId, rawSpec, System.currentTimeMillis())
 
+                val fullScreenIntent = Intent(context, FullScreenAlarmActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra(ReminderScheduler.EXTRA_REMINDER_ID, reminderId)
+                    putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
+                    putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
+                    putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
+                    putExtra(ReminderScheduler.EXTRA_REMINDER_TYPE, remType)
+                    putExtra("extra_notif_id", notifId)
+                }
+
+                val fullScreenPendingIntent = PendingIntent.getActivity(
+                    context,
+                    notifId + 50,
+                    fullScreenIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
                 val openAppIntent = PendingIntent.getActivity(
                     context,
                     notifId,
                     Intent(context, MainActivity::class.java).apply {
                         flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    },
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-
-                val fullScreenPendingIntent = PendingIntent.getActivity(
-                    context,
-                    notifId + 50,
-                    Intent(context, FullScreenAlarmActivity::class.java).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                        putExtra("extra_task_title", taskTitle)
-                        putExtra("extra_raw_spec", rawSpec)
+                        putExtra("extra_open_alarm_task_title", taskTitle)
+                        putExtra("extra_open_alarm_raw_spec", rawSpec)
+                        putExtra("extra_open_alarm_task_id", taskId)
+                        putExtra("extra_open_alarm_reminder_id", reminderId)
                     },
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
@@ -81,67 +95,88 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                     )
                 }
 
+                val asciiBigText = buildString {
+                    appendLine("+====================================+")
+                    appendLine("| [!!] TICK.TXT TASK ALARM RINGING   |")
+                    appendLine("+====================================+")
+                    appendLine("| >> $taskTitle")
+                    appendLine("| >> SPEC: rem:$rawSpec")
+                    append("+------------------------------------+")
+                }
+
                 val builder = NotificationCompat.Builder(context, CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                    .setContentTitle(taskTitle)
-                    .setContentText("rem:$rawSpec • tap to open or use actions below")
-                    .setStyle(NotificationCompat.BigTextStyle().bigText("$taskTitle\nreminder: rem:$rawSpec"))
+                    .setContentTitle("[⏰ ALARM] $taskTitle")
+                    .setContentText("rem:$rawSpec :: Tap for Full-Screen ASCII Alarm & Granular Snooze")
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(asciiBigText))
                     .setPriority(NotificationCompat.PRIORITY_MAX)
-                    .setCategory(if (remType == "a") NotificationCompat.CATEGORY_ALARM else NotificationCompat.CATEGORY_REMINDER)
+                    .setCategory(NotificationCompat.CATEGORY_ALARM)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setDefaults(NotificationCompat.DEFAULT_ALL)
-                    .setContentIntent(openAppIntent)
+                    .setContentIntent(fullScreenPendingIntent)
+                    .setFullScreenIntent(fullScreenPendingIntent, true)
+                    .setOngoing(remType == "a")
                     .setAutoCancel(true)
                     .addAction(
                         0,
-                        "Mark Done",
+                        "[x] DONE",
                         buildActionIntent(ReminderScheduler.ACTION_MARK_DONE, null, 1)
                     )
                     .addAction(
                         0,
-                        "+5m",
-                        buildActionIntent(ReminderScheduler.ACTION_SNOOZE_REMINDER, "5m", 2)
+                        "[+1m]",
+                        buildActionIntent(ReminderScheduler.ACTION_SNOOZE_REMINDER, "1m", 2)
                     )
                     .addAction(
                         0,
-                        "+15m",
-                        buildActionIntent(ReminderScheduler.ACTION_SNOOZE_REMINDER, "15m", 3)
+                        "[⏰ SNOOZE]",
+                        fullScreenPendingIntent
                     )
 
-                if (remType == "a") {
-                    builder.setFullScreenIntent(fullScreenPendingIntent, true)
-                    runCatching {
-                        context.startActivity(
-                            Intent(context, FullScreenAlarmActivity::class.java).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                                putExtra("extra_task_title", taskTitle)
-                                putExtra("extra_raw_spec", rawSpec)
-                            }
-                        )
-                    }
+                nm.notify(notifId, builder.build())
+
+                // Also launch FullScreenAlarmActivity directly when app is in foreground or background allowed
+                runCatching {
+                    context.startActivity(fullScreenIntent)
                 }
 
-                nm.notify(notifId, builder.build())
+                // Notify in-app UI if MainScreen is open so it can also show the in-app ASCII alarm banner/overlay
+                context.sendBroadcast(
+                    Intent(ReminderScheduler.ACTION_ALARM_FIRED_UI).apply {
+                        setPackage(context.packageName)
+                        putExtra(ReminderScheduler.EXTRA_REMINDER_ID, reminderId)
+                        putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
+                        putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
+                        putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
+                    }
+                )
             }
 
             ReminderScheduler.ACTION_SNOOZE_REMINDER -> {
                 val preset = intent.getStringExtra(ReminderScheduler.EXTRA_SNOOZE_PRESET) ?: "5m"
                 val targetZdt = ReminderScheduleCalculator.computeSnoozeTarget(ZonedDateTime.now(), preset)
-                snoozeStore.recordSnooze(taskId, rawSpec, targetZdt.toInstant().toEpochMilli(), 10)
+                val targetEpochMs = targetZdt.toInstant().toEpochMilli()
+                snoozeStore.recordSnooze(taskId, rawSpec, targetEpochMs, 99)
                 ReminderScheduler(context).scheduleRaw(
                     reminderId = reminderId,
                     taskStableId = taskId,
                     rawSpec = rawSpec,
                     taskDescription = taskTitle,
                     typeCode = remType,
-                    triggerEpochMs = targetZdt.toInstant().toEpochMilli()
+                    triggerEpochMs = targetEpochMs
                 )
                 nm.cancel(notifId)
+                val fmtTime = targetZdt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                context.sendBroadcast(
+                    Intent(ReminderScheduler.ACTION_TASKS_UPDATED).apply {
+                        setPackage(context.packageName)
+                        putExtra("extra_status_msg", "Snoozed \"$taskTitle\" (+$preset -> $fmtTime)")
+                    }
+                )
             }
 
             ReminderScheduler.ACTION_MARK_DONE -> {
                 snoozeStore.acknowledgeAndDismiss(taskId, rawSpec)
-                // Mark the matching task completed in todo.txt on disk
                 val currentTasks = repo.loadTasks()
                 val updated = mutableListOf<com.ticktxt.app.core.todotxt.TodoTask>()
                 for (t in currentTasks) {
@@ -155,7 +190,12 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 }
                 repo.saveTasks(updated)
                 nm.cancel(notifId)
-                context.sendBroadcast(Intent(ReminderScheduler.ACTION_TASKS_UPDATED).setPackage(context.packageName))
+                context.sendBroadcast(
+                    Intent(ReminderScheduler.ACTION_TASKS_UPDATED).apply {
+                        setPackage(context.packageName)
+                        putExtra("extra_status_msg", "[x] Marked \"$taskTitle\" DONE")
+                    }
+                )
             }
 
             ReminderScheduler.ACTION_DISMISS_REMINDER -> {
@@ -166,21 +206,30 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
     }
 
     companion object {
-        const val CHANNEL_ID = "tick_reminders_high_v2"
+        const val CHANNEL_ID = "tick_ascii_alarm_channel_v3"
 
-        fun ensureChannel(context: Context, nm: NotificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager) {
+        fun ensureChannel(
+            context: Context,
+            nm: NotificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        ) {
+            val alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val audioAttrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "tick.txt Reminders & Alarms",
+                "tick.txt Full-Screen Alarms & Reminders",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Exact task and note reminders from tick.txt"
+                description = "Full-screen ASCII alarms and task notifications from tick.txt"
                 enableVibration(true)
+                vibrationPattern = longArrayOf(0, 400, 200, 400, 200, 600)
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-                setSound(
-                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
-                    android.app.Notification.AUDIO_ATTRIBUTES_DEFAULT
-                )
+                setBypassDnd(true)
+                setSound(alarmUri, audioAttrs)
             }
             nm.createNotificationChannel(channel)
         }

@@ -44,7 +44,42 @@ fun SettingsScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. GOOGLE CALENDAR SYNC
+        // =====================================================================
+        // ASCII TERMINAL CONFIG BANNER
+        // =====================================================================
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(palette.bgElevated)
+                .border(1.dp, palette.project)
+                .padding(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "╔════════════════════════════════════════╗",
+                color = palette.project,
+                fontSize = 12.sp,
+                fontFamily = fontFamily
+            )
+            Text(
+                text = "║  [⚙] T I C K . T X T  //  S Y S - C F G ║",
+                color = palette.fg,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                fontFamily = fontFamily
+            )
+            Text(
+                text = "╚════════════════════════════════════════╝",
+                color = palette.project,
+                fontSize = 12.sp,
+                fontFamily = fontFamily
+            )
+        }
+
+        // =====================================================================
+        // 1. FULL-SCREEN ALARM, SNOOZE & REMINDER DEFAULTS
+        // =====================================================================
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -54,10 +89,91 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "Google Calendar Sync",
+                text = "┌──[ 01 // FULL-SCREEN ALARM & SNOOZE ]──┐",
                 color = palette.project,
                 fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
+                fontSize = 14.sp,
+                fontFamily = fontFamily
+            )
+
+            Text(
+                text = ":: DEFAULT REMINDER OFFSET FOR SCHEDULED TASKS ::",
+                color = palette.fgMuted,
+                fontSize = 12.sp,
+                fontFamily = fontFamily
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    "0m/a" to "[0m FULL ALARM]",
+                    "0m/n" to "[0m AT DUE]",
+                    "-5m/a" to "[-5m ALARM]",
+                    "-15m/a" to "[-15m ALARM]",
+                    "-30m/a" to "[-30m ALARM]",
+                    "-1h/a" to "[-1h ALARM]",
+                    "-1d/a" to "[-1d ALARM]"
+                ).forEach { (spec, label) ->
+                    val selected = settings.defaultTimedReminder == spec
+                    Box(
+                        modifier = Modifier
+                            .heightIn(min = 46.dp)
+                            .background(if (selected) palette.reminder else palette.bg)
+                            .border(1.dp, if (selected) palette.reminder else palette.border)
+                            .clickable { onUpdateSettings(settings.copy(defaultTimedReminder = spec)) }
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (selected) "* $label *" else label,
+                            color = if (selected) palette.bg else palette.fg,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 13.sp,
+                            fontFamily = fontFamily
+                        )
+                    }
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp)
+                    .background(palette.bg)
+                    .border(2.dp, palette.priorityA)
+                    .clickable { onFireImmediateNotification() }
+                    .padding(vertical = 14.dp, horizontal = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "╔═[ 🔔 TEST FULL-SCREEN ALARM & NOTIFICATION ]═╗",
+                    color = palette.priorityA,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    fontFamily = fontFamily
+                )
+            }
+        }
+
+        // =====================================================================
+        // 2. GOOGLE CALENDAR SYNC
+        // =====================================================================
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(palette.bgElevated)
+                .border(1.dp, palette.border)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "┌──[ 02 // GOOGLE CALENDAR SYNC ]────────┐",
+                color = palette.project,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
                 fontFamily = fontFamily
             )
 
@@ -72,19 +188,21 @@ fun SettingsScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Auto-sync new scheduled tasks",
+                    text = ">> Auto-sync scheduled tasks:",
                     color = palette.fg,
                     fontSize = 14.sp,
                     fontFamily = fontFamily
                 )
                 Box(
                     modifier = Modifier
+                        .heightIn(min = 42.dp)
                         .background(if (settings.autoSyncGoogleCalendar) palette.reminder else palette.bg)
                         .border(1.dp, if (settings.autoSyncGoogleCalendar) palette.reminder else palette.border)
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (settings.autoSyncGoogleCalendar) "ON" else "OFF",
+                        text = if (settings.autoSyncGoogleCalendar) "[[ ON ]]" else "[ OFF ]",
                         color = if (settings.autoSyncGoogleCalendar) palette.bg else palette.fgMuted,
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp,
@@ -96,23 +214,26 @@ fun SettingsScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 48.dp)
+                    .heightIn(min = 50.dp)
                     .background(palette.contextTag)
+                    .border(1.dp, palette.fg)
                     .clickable { onSyncAllToGoogleCalendar() }
                     .padding(vertical = 14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "Sync All Scheduled Tasks to Google Calendar",
+                    text = "[ ⇄ SYNC ALL SCHEDULED TASKS TO GOOGLE CAL ]",
                     color = palette.bg,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     fontFamily = fontFamily
                 )
             }
         }
 
-        // 2. THEME, FONT FAMILY & TEXT SIZE
+        // =====================================================================
+        // 3. THEME, FONT FAMILY & TEXT SIZE
+        // =====================================================================
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -122,28 +243,28 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "Appearance & Font",
+                text = "┌──[ 03 // ASCII THEME & TYPOGRAPHY ]────┐",
                 color = palette.project,
                 fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
+                fontSize = 14.sp,
                 fontFamily = fontFamily
             )
 
-            Text(text = "Theme", color = palette.fgMuted, fontSize = 13.sp, fontFamily = fontFamily)
+            Text(text = ":: COLOR PALETTE ::", color = palette.fgMuted, fontSize = 12.sp, fontFamily = fontFamily)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 listOf(
-                    ThemeMode.DRACULA_DARK to "Dracula",
-                    ThemeMode.ALUCARD_LIGHT to "Alucard",
-                    ThemeMode.SYSTEM to "System"
+                    ThemeMode.DRACULA_DARK to "DRACULA",
+                    ThemeMode.ALUCARD_LIGHT to "ALUCARD",
+                    ThemeMode.SYSTEM to "SYSTEM"
                 ).forEach { (mode, label) ->
                     val selected = settings.themeMode == mode
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 46.dp)
+                            .heightIn(min = 48.dp)
                             .background(if (selected) palette.project else palette.bg)
                             .border(1.dp, if (selected) palette.project else palette.border)
                             .clickable { onUpdateSettings(settings.copy(themeMode = mode)) }
@@ -151,31 +272,31 @@ fun SettingsScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = label,
+                            text = if (selected) "[$label]" else label,
                             color = if (selected) palette.bg else palette.fg,
                             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 14.sp,
+                            fontSize = 13.sp,
                             fontFamily = fontFamily
                         )
                     }
                 }
             }
 
-            Text(text = "Font Family", color = palette.fgMuted, fontSize = 13.sp, fontFamily = fontFamily)
+            Text(text = ":: FONT ENGINE ::", color = palette.fgMuted, fontSize = 12.sp, fontFamily = fontFamily)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 listOf(
-                    FontMode.SYSTEM_SANS to "System Sans",
-                    FontMode.MONOSPACE to "Monospace",
-                    FontMode.SYSTEM_SERIF to "Serif"
+                    FontMode.MONOSPACE to "MONO",
+                    FontMode.SYSTEM_SANS to "SYS SANS",
+                    FontMode.SYSTEM_SERIF to "SERIF"
                 ).forEach { (fMode, label) ->
                     val selected = settings.fontMode == fMode
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 46.dp)
+                            .heightIn(min = 48.dp)
                             .background(if (selected) palette.project else palette.bg)
                             .border(1.dp, if (selected) palette.project else palette.border)
                             .clickable { onUpdateSettings(settings.copy(fontMode = fMode)) }
@@ -183,7 +304,7 @@ fun SettingsScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = label,
+                            text = if (selected) "[$label]" else label,
                             color = if (selected) palette.bg else palette.fg,
                             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 13.sp,
@@ -193,7 +314,7 @@ fun SettingsScreen(
                 }
             }
 
-            Text(text = "Text Size", color = palette.fgMuted, fontSize = 13.sp, fontFamily = fontFamily)
+            Text(text = ":: TEXT SCALE (SP) ::", color = palette.fgMuted, fontSize = 12.sp, fontFamily = fontFamily)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -203,7 +324,7 @@ fun SettingsScreen(
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 46.dp)
+                            .heightIn(min = 48.dp)
                             .background(if (selected) palette.project else palette.bg)
                             .border(1.dp, if (selected) palette.project else palette.border)
                             .clickable { onUpdateSettings(settings.copy(fontSizeSp = sz)) }
@@ -211,7 +332,7 @@ fun SettingsScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "${sz}sp",
+                            text = if (selected) "[${sz}sp]" else "${sz}sp",
                             color = if (selected) palette.bg else palette.fg,
                             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 14.sp,
@@ -222,7 +343,9 @@ fun SettingsScreen(
             }
         }
 
-        // 3. REMINDER DEFAULTS
+        // =====================================================================
+        // 4. STORAGE & PLAIN-TEXT FILES
+        // =====================================================================
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -232,88 +355,14 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "Reminders",
+                text = "┌──[ 04 // PLAIN-TEXT DISK STORAGE ]─────┐",
                 color = palette.project,
                 fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
-                fontFamily = fontFamily
-            )
-
-            Text(text = "Default Reminder Offset", color = palette.fgMuted, fontSize = 13.sp, fontFamily = fontFamily)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(
-                    "0m/n" to "At due time",
-                    "-5m/n" to "5m before",
-                    "-15m/n" to "15m before",
-                    "-30m/n" to "30m before",
-                    "-1h/n" to "1h before",
-                    "-1d/n" to "1d before",
-                    "0m/a" to "Loud Alarm"
-                ).forEach { (spec, label) ->
-                    val selected = settings.defaultTimedReminder == spec
-                    Box(
-                        modifier = Modifier
-                            .heightIn(min = 44.dp)
-                            .background(if (selected) palette.reminder else palette.bg)
-                            .border(1.dp, if (selected) palette.reminder else palette.border)
-                            .clickable { onUpdateSettings(settings.copy(defaultTimedReminder = spec)) }
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = label,
-                            color = if (selected) palette.bg else palette.fg,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 13.sp,
-                            fontFamily = fontFamily
-                        )
-                    }
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .background(palette.bg)
-                    .border(1.dp, palette.reminder)
-                    .clickable { onFireImmediateNotification() }
-                    .padding(vertical = 14.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Send Test Notification Now",
-                    color = palette.reminder,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    fontFamily = fontFamily
-                )
-            }
-        }
-
-        // 4. STORAGE & FILES
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.bgElevated)
-                .border(1.dp, palette.border)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "Files & Storage",
-                color = palette.project,
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
+                fontSize = 14.sp,
                 fontFamily = fontFamily
             )
             Text(
-                text = "Folder: $storageFolderPath",
+                text = "PATH >> $storageFolderPath",
                 color = palette.fgMuted,
                 fontSize = 12.sp,
                 fontFamily = fontFamily
@@ -333,10 +382,10 @@ fun SettingsScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "Choose Folder",
+                        text = "[ 📁 PICK DIR ]",
                         color = palette.bg,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
+                        fontSize = 13.sp,
                         fontFamily = fontFamily
                     )
                 }
@@ -352,10 +401,10 @@ fun SettingsScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "Open / Share todo.txt",
+                        text = "[ 📤 OPEN TODO.TXT ]",
                         color = palette.fg,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
+                        fontSize = 13.sp,
                         fontFamily = fontFamily
                     )
                 }
@@ -372,9 +421,10 @@ fun SettingsScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "Archive Completed Tasks to done.txt",
+                    text = "[ 📦 ARCHIVE DONE (x) -> DONE.TXT ]",
                     color = palette.fgMuted,
-                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
                     fontFamily = fontFamily
                 )
             }

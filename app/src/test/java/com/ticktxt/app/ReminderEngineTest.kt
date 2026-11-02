@@ -34,6 +34,19 @@ class ReminderEngineTest {
     }
 
     @Test
+    fun `computes granular snooze targets for seconds, minutes, hours, days, weeks, and months`() {
+        val zone = ZoneId.of("Asia/Kathmandu")
+        val now = ZonedDateTime.of(2026, 11, 1, 19, 0, 0, 0, zone)
+
+        assertEquals(now.plusSeconds(30), ReminderScheduleCalculator.computeSnoozeTarget(now, "30s"))
+        assertEquals(now.plusMinutes(5), ReminderScheduleCalculator.computeSnoozeTarget(now, "5m"))
+        assertEquals(now.plusHours(2), ReminderScheduleCalculator.computeSnoozeTarget(now, "2h"))
+        assertEquals(now.plusDays(3), ReminderScheduleCalculator.computeSnoozeTarget(now, "3d"))
+        assertEquals(now.plusWeeks(2), ReminderScheduleCalculator.computeSnoozeTarget(now, "2w"))
+        assertEquals(now.plusMonths(1), ReminderScheduleCalculator.computeSnoozeTarget(now, "1mo"))
+    }
+
+    @Test
     fun `computes multiple reminders per task and respects snooze state without altering due date`(@TempDir tempDir: File) {
         val stateFile = File(tempDir, "alarm-state.json")
         val snoozeStore = SnoozeStateStore(stateFile)

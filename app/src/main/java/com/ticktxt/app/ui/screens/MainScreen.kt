@@ -46,6 +46,7 @@ import com.ticktxt.app.core.nlp.SmartAddParser
 import com.ticktxt.app.core.notes.NotesRepository
 import com.ticktxt.app.core.reminders.ReminderScheduleCalculator
 import com.ticktxt.app.core.reminders.ReminderScheduler
+import com.ticktxt.app.core.reminders.SnoozeUnit
 import com.ticktxt.app.core.storage.PersistedSettings
 import com.ticktxt.app.core.storage.TickStorageRepository
 import com.ticktxt.app.core.todotxt.TodoParser
@@ -57,6 +58,14 @@ import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+
+data class ActiveAlarmPayload(
+    val reminderId: String,
+    val taskId: String,
+    val taskTitle: String,
+    val rawSpec: String
+)
 
 @Composable
 fun MainScreen(
@@ -93,10 +102,16 @@ fun MainScreen(
     var activeFilter by remember { mutableStateOf("all") }
     var editingTask by remember { mutableStateOf<TodoTask?>(null) }
     var editingTaskDraft by remember { mutableStateOf("") }
+    var editSnoozeUnit by remember { mutableStateOf(SnoozeUnit.MINUTES) }
+    var editSnoozeAmount by remember { mutableStateOf(5) }
+
+    var activeAlarmOverlay by remember { mutableStateOf<ActiveAlarmPayload?>(null) }
 
     var smartInput by remember { mutableStateOf("") }
     var disabledSpans by remember { mutableStateOf(setOf<String>()) }
     var showTimePickerSheet by remember { mutableStateOf(false) }
+    var pickerUnit by remember { mutableStateOf(SnoozeUnit.MINUTES) }
+    var pickerAmount by remember { mutableStateOf(5) }
 
     var undoSnapshot by remember { mutableStateOf<List<TodoTask>?>(null) }
     var statusBanner by remember { mutableStateOf<String?>(null) }
@@ -113,9 +128,47 @@ fun MainScreen(
             val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
             tasks = syncedList
             storageRepo.saveTasks(syncedList)
-            statusBanner = "Synced $count task(s) to Google Calendar"
+            statusBanner = "[✓ GCAL] Synced $count task(s) to Google Calendar"
         } else {
-            statusBanner = "Calendar permission needed for background sync (or use Open in Calendar)"
+            statusBanner = "[! GCAL] Permission needed for background sync (using Calendar intent)"
+        }
+    }
+
+    fun triggerFullAlarmAndNotification(taskTitle: String, rawSpec: String = "0m/a", taskId: String = "immediate") {
+        scheduler.fireImmediateNotification(
+            taskTitle = taskTitle,
+            rawSpec = rawSpec,
+            typeCode = "a",
+            taskId = taskId
+        )
+        activeAlarmOverlay = ActiveAlarmPayload(
+            reminderId = "$taskId|$rawSpec",
+            taskId = taskId,
+            taskTitle = taskTitle,
+            rawSpec = rawSpec
+        )
+    }
+
+    fun scheduleExactDelayAlarm(task: TodoTask, delayMs: Long, rawSpec: String = "0m/a") {
+        val safeDelay = delayMs.coerceAtLeast(1_000L)
+        val targetEpochMs = System.currentTimeMillis() + safeDelay
+        scheduler.scheduleRaw(
+            reminderId = "${task.stableId}|$rawSpec",
+            taskStableId = task.stableId,
+            rawSpec = rawSpec,
+            taskDescription = task.description,
+            typeCode = "a",
+            triggerEpochMs = targetEpochMs
+        )
+        if (safeDelay <= 7_200_000L) {
+            coroutineScope.launch {
+                delay(safeDelay)
+                triggerFullAlarmAndNotification(
+                    taskTitle = task.description,
+                    rawSpec = rawSpec,
+                    taskId = task.stableId
+                )
+            }
         }
     }
 
@@ -139,26 +192,15 @@ fun MainScreen(
 
         val nowZdt = ZonedDateTime.now()
         finalTasks.forEachIndexed { idx, t ->
-            val instances = ReminderScheduleCalculator.computeSchedulesForTask(t, nowZdt)
-            instances.forEach { inst ->
-                val isLastAdded = (idx == finalTasks.lastIndex && exactDelayMillisForLastTask != null)
-                val targetMs = if (isLastAdded) {
-                    System.currentTimeMillis() + exactDelayMillisForLastTask!!
-                } else {
-                    inst.triggerAt.toInstant().toEpochMilli()
-                }
-                if (targetMs > System.currentTimeMillis() - 5_000L) {
-                    scheduler.scheduleInstance(inst, overrideTriggerEpochMs = targetMs)
-                    val delayMs = targetMs - System.currentTimeMillis()
-                    if (isLastAdded && delayMs in 1_000L..7_200_000L) {
-                        coroutineScope.launch {
-                            delay(delayMs)
-                            scheduler.fireImmediateNotification(
-                                taskTitle = t.description,
-                                rawSpec = inst.spec.rawSpec,
-                                typeCode = inst.spec.type.code
-                            )
-                        }
+            val isLastAdded = (idx == finalTasks.lastIndex && exactDelayMillisForLastTask != null)
+            if (isLastAdded && exactDelayMillisForLastTask != null) {
+                scheduleExactDelayAlarm(t, exactDelayMillisForLastTask, "0m/a")
+            } else {
+                val instances = ReminderScheduleCalculator.computeSchedulesForTask(t, nowZdt)
+                instances.forEach { inst ->
+                    val targetMs = inst.triggerAt.toInstant().toEpochMilli()
+                    if (targetMs > System.currentTimeMillis() - 5_000L) {
+                        scheduler.scheduleInstance(inst, overrideTriggerEpochMs = targetMs)
                     }
                 }
             }
@@ -184,15 +226,30 @@ fun MainScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Listen for Mark Done action from Android notification
+    // Listen for Mark Done / Snooze / Alarm broadcasts from Android Notification & AlarmBroadcastReceiver
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
-                tasks = storageRepo.loadTasks()
-                statusBanner = "Task marked done"
+                when (intent?.action) {
+                    ReminderScheduler.ACTION_TASKS_UPDATED -> {
+                        tasks = storageRepo.loadTasks()
+                        val msg = intent.getStringExtra("extra_status_msg") ?: "[✓] Task state updated"
+                        statusBanner = msg
+                    }
+                    ReminderScheduler.ACTION_ALARM_FIRED_UI -> {
+                        val remId = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_ID) ?: "alarm"
+                        val tId = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_ID) ?: "task"
+                        val spec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC) ?: "0m/a"
+                        val title = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE) ?: "scheduled task"
+                        activeAlarmOverlay = ActiveAlarmPayload(remId, tId, title, spec)
+                    }
+                }
             }
         }
-        val filter = IntentFilter(ReminderScheduler.ACTION_TASKS_UPDATED)
+        val filter = IntentFilter().apply {
+            addAction(ReminderScheduler.ACTION_TASKS_UPDATED)
+            addAction(ReminderScheduler.ACTION_ALARM_FIRED_UI)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -203,9 +260,10 @@ fun MainScreen(
 
     // Back gesture support
     BackHandler(
-        enabled = editingTask != null || showTimePickerSheet || noteEditMode || currentTab != "tasks"
+        enabled = activeAlarmOverlay != null || editingTask != null || showTimePickerSheet || noteEditMode || currentTab != "tasks"
     ) {
         when {
+            activeAlarmOverlay != null -> activeAlarmOverlay = null
             editingTask != null -> editingTask = null
             showTimePickerSheet -> showTimePickerSheet = false
             noteEditMode -> {
@@ -230,7 +288,7 @@ fun MainScreen(
             }
             onUpdateSettings(settings.copy(customSafUri = uri.toString()))
             storageRepo.saveTasks(tasks)
-            statusBanner = "Folder updated"
+            statusBanner = "[📁] Storage directory updated"
         }
     }
 
@@ -264,10 +322,16 @@ fun MainScreen(
             disabledSpans = emptySet()
             showTimePickerSheet = false
             focusManager.clearFocus()
-            val remInfo = if (newTask.dueTime != null) {
-                " • Reminder set for ${newTask.dueTime}"
-            } else ""
-            statusBanner = "Added \"${newTask.description}\"$remInfo"
+            val remInfo = when {
+                res.exactOffsetMillis != null && res.exactOffsetMillis < 60_000L ->
+                    " [⏰ ALARM IN ${res.exactOffsetMillis / 1000L}s]"
+                newTask.dueTime != null ->
+                    " [⏰ ALARM @ ${newTask.dueTime}]"
+                newTask.dueDate != null ->
+                    " [📅 DUE ${newTask.dueDate}]"
+                else -> ""
+            }
+            statusBanner = "[+ TASK] \"${newTask.description}\"$remInfo"
         }
     }
 
@@ -287,6 +351,64 @@ fun MainScreen(
         }
     }
 
+    // =========================================================================
+    // FULL-SCREEN ASCII ALARM OVERLAY (When alarm fires or user taps [🔔 ALARM])
+    // =========================================================================
+    if (activeAlarmOverlay != null) {
+        val alarm = activeAlarmOverlay!!
+        AsciiFullScreenAlarmSurface(
+            taskTitle = alarm.taskTitle,
+            rawSpec = alarm.rawSpec,
+            fontSizeSp = fontScaleSp,
+            onSnoozeWithPreset = { presetSpec ->
+                val targetZdt = ReminderScheduleCalculator.computeSnoozeTarget(ZonedDateTime.now(), presetSpec)
+                val delayMs = (targetZdt.toInstant().toEpochMilli() - System.currentTimeMillis()).coerceAtLeast(1_000L)
+                val matchingTask = tasks.firstOrNull {
+                    it.stableId == alarm.taskId || it.description.equals(alarm.taskTitle, ignoreCase = true)
+                }
+                if (matchingTask != null) {
+                    scheduleExactDelayAlarm(matchingTask, delayMs, alarm.rawSpec)
+                } else {
+                    scheduler.scheduleRaw(
+                        reminderId = alarm.reminderId,
+                        taskStableId = alarm.taskId,
+                        rawSpec = alarm.rawSpec,
+                        taskDescription = alarm.taskTitle,
+                        typeCode = "a",
+                        triggerEpochMs = targetZdt.toInstant().toEpochMilli()
+                    )
+                    if (delayMs <= 7_200_000L) {
+                        coroutineScope.launch {
+                            delay(delayMs)
+                            triggerFullAlarmAndNotification(alarm.taskTitle, alarm.rawSpec, alarm.taskId)
+                        }
+                    }
+                }
+                val fmtTime = targetZdt.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                statusBanner = "[💤 SNOOZED +$presetSpec] Next alarm -> $fmtTime"
+                activeAlarmOverlay = null
+            },
+            onDismiss = {
+                statusBanner = "[✕ DISMISSED] Alarm silenced for \"${alarm.taskTitle}\""
+                activeAlarmOverlay = null
+            },
+            onMarkDone = {
+                undoSnapshot = tasks
+                val nextList = tasks.map { t ->
+                    if (!t.isCompleted && (t.stableId == alarm.taskId || t.description.equals(alarm.taskTitle, ignoreCase = true))) {
+                        TodoParser.markCompleted(t, LocalDate.now()).first
+                    } else {
+                        t
+                    }
+                }
+                persistAndSchedule(nextList)
+                statusBanner = "[x DONE] Completed \"${alarm.taskTitle}\""
+                activeAlarmOverlay = null
+            }
+        )
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -296,46 +418,52 @@ fun MainScreen(
             .imePadding()
     ) {
         // =====================================================================
-        // SPACIOUS TOP NAVIGATION BAR (48dp+ touch targets, zero fluff)
+        // SPACIOUS ASCII TOP NAVIGATION BAR (48dp+ touch targets)
         // =====================================================================
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(palette.bgElevated)
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .border(1.dp, palette.border)
         ) {
-            val openCount = tasks.count { !it.isBlankOrComment && !it.isCompleted }
-            listOf(
-                "tasks" to "Tasks ($openCount)",
-                "notes" to "Notes (${notes.size})",
-                "settings" to "Settings"
-            ).forEach { (tabKey, tabLabel) ->
-                val selected = currentTab == tabKey
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 46.dp)
-                        .background(if (selected) palette.project else palette.bg)
-                        .border(1.dp, if (selected) palette.project else palette.border)
-                        .clickable { currentTab = tabKey }
-                        .padding(vertical = 10.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = tabLabel,
-                        color = if (selected) palette.bg else palette.fg,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        fontSize = 14.sp,
-                        fontFamily = fontFamily
-                    )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val openCount = tasks.count { !it.isBlankOrComment && !it.isCompleted }
+                listOf(
+                    "tasks" to "TASKS:$openCount",
+                    "notes" to "NOTES:${notes.size}",
+                    "settings" to "CFG/SYS"
+                ).forEach { (tabKey, tabLabel) ->
+                    val selected = currentTab == tabKey
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .background(if (selected) palette.project else palette.bg)
+                            .border(1.dp, if (selected) palette.project else palette.border)
+                            .clickable { currentTab = tabKey }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (selected) "╔[$tabLabel]╗" else "[$tabLabel]",
+                            color = if (selected) palette.bg else palette.fg,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            fontSize = 13.sp,
+                            fontFamily = fontFamily
+                        )
+                    }
                 }
             }
         }
 
         // =====================================================================
-        // FEEDBACK / UNDO BANNER (Spacious, easy to tap)
+        // ASCII FEEDBACK / UNDO BANNER (Spacious, easy to tap)
         // =====================================================================
         if (statusBanner != null) {
             Row(
@@ -349,42 +477,48 @@ fun MainScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = statusBanner ?: "",
+                    text = ">> ${statusBanner ?: ""}",
                     color = palette.fg,
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     fontFamily = fontFamily,
                     modifier = Modifier.weight(1f)
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (undoSnapshot != null) {
                         Box(
                             modifier = Modifier
+                                .heightIn(min = 38.dp)
                                 .background(palette.project)
                                 .clickable {
                                     persistAndSchedule(undoSnapshot!!)
                                     undoSnapshot = null
                                     statusBanner = null
                                 }
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "Undo",
+                                text = "[↶ UNDO]",
                                 color = palette.bg,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
+                                fontSize = 12.sp,
                                 fontFamily = fontFamily
                             )
                         }
                     }
                     Box(
                         modifier = Modifier
+                            .heightIn(min = 38.dp)
+                            .border(1.dp, palette.border)
                             .clickable { statusBanner = null }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "Dismiss",
+                            text = "[✕]",
                             color = palette.fgMuted,
-                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
                             fontFamily = fontFamily
                         )
                     }
@@ -393,7 +527,7 @@ fun MainScreen(
         }
 
         // =====================================================================
-        // TASK EDIT & GOOGLE CALENDAR SHEET (Opens when tapping any task)
+        // ASCII TASK EDIT, GRANULAR SNOOZE & FULL-SCREEN ALARM SHEET
         // =====================================================================
         if (editingTask != null) {
             val target = editingTask!!
@@ -402,7 +536,7 @@ fun MainScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .background(palette.bgElevated)
-                    .border(1.dp, palette.project)
+                    .border(2.dp, palette.project)
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
@@ -412,18 +546,21 @@ fun MainScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Edit Task & Reminder",
+                        text = "╔═[ ✎ TASK & GRANULAR SNOOZE ]═╗",
                         color = palette.project,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
+                        fontSize = 14.sp,
                         fontFamily = fontFamily
                     )
                     Box(
                         modifier = Modifier
+                            .heightIn(min = 40.dp)
+                            .border(1.dp, palette.border)
                             .clickable { editingTask = null }
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(text = "Close", color = palette.fgMuted, fontSize = 14.sp, fontFamily = fontFamily)
+                        Text(text = "[✕ ESC]", color = palette.fgMuted, fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = fontFamily)
                     }
                 }
 
@@ -439,52 +576,101 @@ fun MainScreen(
                         .padding(14.dp)
                 )
 
+                // Granular Snooze / Alarm Selector (SEC | MIN | HR | DAY | WK | MO)
                 Text(
-                    text = "Set Reminder In:",
+                    text = "├─[ SNOOZE / ALARM UNIT: SEC | MIN | HR | DAY | WK | MO ]─┤",
                     color = palette.fgMuted,
-                    fontSize = 13.sp,
+                    fontSize = 11.sp,
                     fontFamily = fontFamily
                 )
+
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    listOf(
-                        "1 min" to 1L,
-                        "5 min" to 5L,
-                        "15 min" to 15L,
-                        "30 min" to 30L,
-                        "1 hr" to 60L,
-                        "1.5 hrs" to 90L,
-                        "2 hrs" to 120L,
-                        "Tomorrow" to 1440L
-                    ).forEach { (label, mins) ->
+                    SnoozeUnit.entries.forEach { u ->
+                        val sel = editSnoozeUnit == u
                         Box(
                             modifier = Modifier
-                                .heightIn(min = 42.dp)
-                                .background(palette.bg)
-                                .border(1.dp, palette.reminder)
+                                .weight(1f)
+                                .heightIn(min = 44.dp)
+                                .background(if (sel) palette.project else palette.bg)
+                                .border(1.dp, if (sel) palette.project else palette.border)
                                 .clickable {
-                                    val dt = LocalDateTime.now().plusMinutes(mins)
-                                    val dStr = dt.toLocalDate().toString()
-                                    val tStr = "%02d:%02d".format(dt.hour, dt.minute)
-                                    var parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
-                                    parsed = TodoParser.withUpdatedTag(parsed, "due", dStr)
-                                    parsed = TodoParser.withUpdatedTag(parsed, "duetime", tStr)
-                                    parsed = TodoParser.withReplacedMultiTag(parsed, "rem", listOf("0m/n"))
-                                    editingTaskDraft = TodoParser.serializeLine(parsed)
+                                    editSnoozeUnit = u
+                                    if (editSnoozeAmount !in u.quickValues) {
+                                        editSnoozeAmount = u.quickValues.first()
+                                    }
                                 }
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(text = label, color = palette.reminder, fontSize = 13.sp, fontFamily = fontFamily)
+                            Text(
+                                text = if (sel) "[${u.asciiLabel}]" else u.asciiLabel,
+                                color = if (sel) palette.bg else palette.fg,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                fontFamily = fontFamily
+                            )
                         }
                     }
                 }
 
-                // Google Calendar Sync Row
+                // Quick value chips + stepper for selected unit
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .heightIn(min = 44.dp)
+                            .background(palette.bg)
+                            .border(1.dp, palette.priorityA)
+                            .clickable { editSnoozeAmount = (editSnoozeAmount - 1).coerceAtLeast(1) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "[-1]", color = palette.priorityA, fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = fontFamily)
+                    }
+
+                    editSnoozeUnit.quickValues.forEach { qv ->
+                        val activeQv = editSnoozeAmount == qv
+                        Box(
+                            modifier = Modifier
+                                .heightIn(min = 44.dp)
+                                .background(if (activeQv) palette.priorityB else palette.bg)
+                                .border(1.dp, if (activeQv) palette.priorityB else palette.border)
+                                .clickable { editSnoozeAmount = qv }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "[+$qv${editSnoozeUnit.code}]",
+                                color = if (activeQv) palette.bg else palette.fg,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                fontFamily = fontFamily
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .heightIn(min = 44.dp)
+                            .background(palette.bg)
+                            .border(1.dp, palette.reminder)
+                            .clickable { editSnoozeAmount = (editSnoozeAmount + 1).coerceAtMost(365) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "[+1]", color = palette.reminder, fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = fontFamily)
+                    }
+                }
+
+                // Apply Granular Snooze / Alarm Button + Fire Immediate Full-Screen Alarm Button
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -492,37 +678,106 @@ fun MainScreen(
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 46.dp)
+                            .heightIn(min = 48.dp)
                             .background(palette.bg)
-                            .border(1.dp, palette.contextTag)
+                            .border(1.dp, palette.reminder)
                             .clickable {
-                                val parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
-                                if (gcalManager.hasCalendarPermissions()) {
-                                    val (syncedTask, ok) = gcalManager.syncTaskToGoogleCalendar(parsed)
-                                    if (ok) {
-                                        persistAndSchedule(
-                                            tasks.map { if (it.lineNumber == target.lineNumber) syncedTask else it }
-                                        )
-                                        editingTask = null
-                                        statusBanner = "Synced to Google Calendar"
-                                    } else {
-                                        gcalManager.openInGoogleCalendarApp(parsed)
-                                    }
-                                } else {
-                                    gcalManager.openInGoogleCalendarApp(parsed)
-                                }
+                                val zdt = ReminderScheduleCalculator.computeGranularSnoozeTarget(
+                                    ZonedDateTime.now(),
+                                    editSnoozeAmount.toDouble(),
+                                    editSnoozeUnit
+                                )
+                                val dStr = zdt.toLocalDate().toString()
+                                val tStr = "%02d:%02d".format(zdt.hour, zdt.minute)
+                                var parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+                                parsed = TodoParser.withUpdatedTag(parsed, "due", dStr)
+                                parsed = TodoParser.withUpdatedTag(parsed, "duetime", tStr)
+                                parsed = TodoParser.withReplacedMultiTag(parsed, "rem", listOf("0m/a"))
+                                editingTaskDraft = TodoParser.serializeLine(parsed)
+
+                                val delayMs = (zdt.toInstant().toEpochMilli() - System.currentTimeMillis()).coerceAtLeast(1_000L)
+                                undoSnapshot = tasks
+                                val updatedTasks = tasks.map { if (it.lineNumber == target.lineNumber) parsed else it }
+                                tasks = updatedTasks
+                                storageRepo.saveTasks(updatedTasks)
+                                scheduleExactDelayAlarm(parsed, delayMs, "0m/a")
+                                editingTask = null
+                                statusBanner = "[⏰ ALARM SET] +$editSnoozeAmount ${editSnoozeUnit.asciiLabel} (${zdt.format(DateTimeFormatter.ofPattern("HH:mm:ss"))})"
                             }
-                            .padding(vertical = 12.dp),
+                            .padding(vertical = 12.dp, horizontal = 8.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "Add to Google Calendar",
-                            color = palette.contextTag,
+                            text = "[⏰ SNOOZE +$editSnoozeAmount ${editSnoozeUnit.asciiLabel}]",
+                            color = palette.reminder,
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp,
                             fontFamily = fontFamily
                         )
                     }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .background(palette.bg)
+                            .border(1.dp, palette.priorityA)
+                            .clickable {
+                                val parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+                                editingTask = null
+                                triggerFullAlarmAndNotification(
+                                    taskTitle = parsed.description,
+                                    rawSpec = parsed.reminderSpecs.firstOrNull() ?: "0m/a",
+                                    taskId = parsed.stableId
+                                )
+                            }
+                            .padding(vertical = 12.dp, horizontal = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "[🔔 FULL ALARM NOW]",
+                            color = palette.priorityA,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            fontFamily = fontFamily
+                        )
+                    }
+                }
+
+                // Google Calendar Sync Row
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 46.dp)
+                        .background(palette.bg)
+                        .border(1.dp, palette.contextTag)
+                        .clickable {
+                            val parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+                            if (gcalManager.hasCalendarPermissions()) {
+                                val (syncedTask, ok) = gcalManager.syncTaskToGoogleCalendar(parsed)
+                                if (ok) {
+                                    persistAndSchedule(
+                                        tasks.map { if (it.lineNumber == target.lineNumber) syncedTask else it }
+                                    )
+                                    editingTask = null
+                                    statusBanner = "[✓ GCAL] Synced to Google Calendar"
+                                } else {
+                                    gcalManager.openInGoogleCalendarApp(parsed)
+                                }
+                            } else {
+                                gcalManager.openInGoogleCalendarApp(parsed)
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "[ ⇄ SYNC TASK TO GOOGLE CALENDAR ]",
+                        color = palette.contextTag,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        fontFamily = fontFamily
+                    )
                 }
 
                 // Delete / Save Buttons
@@ -540,13 +795,13 @@ fun MainScreen(
                                 undoSnapshot = tasks
                                 persistAndSchedule(tasks.filterNot { it.lineNumber == target.lineNumber })
                                 editingTask = null
-                                statusBanner = "Task deleted"
+                                statusBanner = "[✕ DELETED] Task removed"
                             }
                             .padding(vertical = 12.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "Delete",
+                            text = "[ ✕ DELETE ]",
                             color = palette.priorityA,
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp,
@@ -566,13 +821,13 @@ fun MainScreen(
                                     tasks.map { if (it.lineNumber == target.lineNumber) reParsed else it }
                                 )
                                 editingTask = null
-                                statusBanner = "Changes saved"
+                                statusBanner = "[✓ SAVED] Task updated in todo.txt"
                             }
                             .padding(vertical = 12.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "Save",
+                            text = "[ ✓ SAVE LINE ]",
                             color = palette.bg,
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp,
@@ -589,7 +844,7 @@ fun MainScreen(
         when (currentTab) {
             "tasks" -> {
                 Column(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    // Spacious Filter Pills
+                    // Spacious ASCII Filter Bar
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -599,24 +854,24 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         val filters = listOf(
-                            "all" to "All",
-                            "open" to "Open",
-                            "due" to "Scheduled"
+                            "all" to "ALL",
+                            "open" to "OPEN",
+                            "due" to "SCHEDULED"
                         ) + dynamicProjects.map { it to it } + dynamicContexts.map { it to it }
 
                         filters.forEach { (fKey, fLabel) ->
                             val active = activeFilter == fKey
                             Box(
                                 modifier = Modifier
-                                    .heightIn(min = 40.dp)
+                                    .heightIn(min = 42.dp)
                                     .background(if (active) palette.project else palette.bgElevated)
                                     .border(1.dp, if (active) palette.project else palette.border)
                                     .clickable { activeFilter = fKey }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = fLabel,
+                                    text = if (active) "[[ * $fLabel * ]]" else "[ $fLabel ]",
                                     color = if (active) palette.bg else palette.fg,
                                     fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
                                     fontSize = 13.sp,
@@ -626,26 +881,49 @@ fun MainScreen(
                         }
                     }
 
-                    // Spacious Task List
+                    // Spacious ASCII Task List
                     LazyColumn(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         if (filteredTasks.isEmpty()) {
                             item {
-                                Box(
+                                Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(vertical = 32.dp),
-                                    contentAlignment = Alignment.Center
+                                        .padding(vertical = 28.dp)
+                                        .background(palette.bgElevated)
+                                        .border(1.dp, palette.border)
+                                        .padding(20.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
-                                        text = "No tasks here yet. Type below to add one.",
-                                        color = palette.fgMuted,
+                                        text = "╔══════════════════════════════════╗",
+                                        color = palette.project,
+                                        fontSize = 12.sp,
+                                        fontFamily = fontFamily
+                                    )
+                                    Text(
+                                        text = "║   (o_o)  0 TASKS IN BUFFER       ║",
+                                        color = palette.fg,
+                                        fontWeight = FontWeight.Bold,
                                         fontSize = fontScaleSp.sp,
+                                        fontFamily = fontFamily
+                                    )
+                                    Text(
+                                        text = "║   Type below to schedule alarm   ║",
+                                        color = palette.fgMuted,
+                                        fontSize = 13.sp,
+                                        fontFamily = fontFamily
+                                    )
+                                    Text(
+                                        text = "╚══════════════════════════════════╝",
+                                        color = palette.project,
+                                        fontSize = 12.sp,
                                         fontFamily = fontFamily
                                     )
                                 }
@@ -655,6 +933,7 @@ fun MainScreen(
                                 UsableTaskCard(
                                     task = task,
                                     fontSizeSp = fontScaleSp,
+                                    fontScaleSp = fontScaleSp,
                                     onToggleDone = {
                                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                         undoSnapshot = tasks
@@ -674,6 +953,13 @@ fun MainScreen(
                                         editingTask = task
                                         editingTaskDraft = TodoParser.serializeLine(task)
                                     },
+                                    onTriggerAlarmAndSnooze = {
+                                        triggerFullAlarmAndNotification(
+                                            taskTitle = task.description,
+                                            rawSpec = task.reminderSpecs.firstOrNull() ?: "0m/a",
+                                            taskId = task.stableId
+                                        )
+                                    },
                                     onSyncCalendar = {
                                         if (gcalManager.hasCalendarPermissions()) {
                                             val (synced, ok) = gcalManager.syncTaskToGoogleCalendar(task)
@@ -681,7 +967,7 @@ fun MainScreen(
                                                 persistAndSchedule(
                                                     tasks.map { if (it.lineNumber == task.lineNumber) synced else it }
                                                 )
-                                                statusBanner = "Synced \"${task.description}\" to Google Calendar"
+                                                statusBanner = "[✓ GCAL] Synced \"${task.description}\""
                                             } else {
                                                 gcalManager.openInGoogleCalendarApp(task)
                                             }
@@ -694,14 +980,14 @@ fun MainScreen(
                         }
                     }
 
-                    // Expandable Quick Time Picker Sheet (when tapping [+ Time])
+                    // Expandable ASCII Granular Time & Snooze Picker Sheet (when tapping [⏰ +TIME])
                     if (showTimePickerSheet) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 6.dp)
                                 .background(palette.bgElevated)
-                                .border(1.dp, palette.border)
+                                .border(2.dp, palette.project)
                                 .padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
@@ -711,10 +997,10 @@ fun MainScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "Quick Reminder Time",
+                                    text = "╔═[ ⏰ GRANULAR OFFSET: SEC/MIN/HR/DAY/WK/MO ]═╗",
                                     color = palette.project,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
+                                    fontSize = 12.sp,
                                     fontFamily = fontFamily
                                 )
                                 Box(
@@ -722,19 +1008,50 @@ fun MainScreen(
                                         .clickable { showTimePickerSheet = false }
                                         .padding(horizontal = 10.dp, vertical = 4.dp)
                                 ) {
-                                    Text(text = "Done", color = palette.reminder, fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = fontFamily)
+                                    Text(text = "[✕]", color = palette.reminder, fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = fontFamily)
                                 }
                             }
+
+                            // Unit selector row: SEC | MIN | HR | DAY | WK | MO
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                SnoozeUnit.entries.forEach { u ->
+                                    val sel = pickerUnit == u
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .heightIn(min = 42.dp)
+                                            .background(if (sel) palette.project else palette.bg)
+                                            .border(1.dp, if (sel) palette.project else palette.border)
+                                            .clickable {
+                                                pickerUnit = u
+                                                pickerAmount = u.quickValues.first()
+                                            }
+                                            .padding(vertical = 8.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (sel) "[${u.asciiLabel}]" else u.asciiLabel,
+                                            color = if (sel) palette.bg else palette.fg,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            fontFamily = fontFamily
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Quick chips for chosen unit
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                listOf(
-                                    "in 1m", "in 5m", "in 15m", "in 30m",
-                                    "in 1 hr", "in 1.5 hrs", "in 2 hrs", "tomorrow 9am", "in 1 week", "in 1 month"
-                                ).forEach { chip ->
+                                pickerUnit.quickValues.forEach { qv ->
+                                    val chip = "in $qv${pickerUnit.code}"
                                     Box(
                                         modifier = Modifier
                                             .heightIn(min = 42.dp)
@@ -747,14 +1064,20 @@ fun MainScreen(
                                             .padding(horizontal = 14.dp, vertical = 10.dp),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        Text(text = chip, color = palette.reminder, fontSize = 13.sp, fontFamily = fontFamily)
+                                        Text(
+                                            text = "[$chip]",
+                                            color = palette.reminder,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            fontFamily = fontFamily
+                                        )
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Clean Live Smart-Add Preview Chips (Only shown while typing)
+                    // Live ASCII Smart-Add Preview Chips (Only shown while typing)
                     if (parsePreview != null && parsePreview.recognizedSpans.isNotEmpty()) {
                         Row(
                             modifier = Modifier
@@ -767,7 +1090,7 @@ fun MainScreen(
                             parsePreview.recognizedSpans.forEach { span ->
                                 Box(
                                     modifier = Modifier
-                                        .heightIn(min = 36.dp)
+                                        .heightIn(min = 38.dp)
                                         .background(palette.bgElevated)
                                         .border(1.dp, palette.reminder)
                                         .clickable { disabledSpans = disabledSpans + span.id }
@@ -775,9 +1098,10 @@ fun MainScreen(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = "${span.resolvedToken}  ✕",
+                                        text = "[ ${span.resolvedToken} ✕ ]",
                                         color = palette.reminder,
-                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
                                         fontFamily = fontFamily
                                     )
                                 }
@@ -785,7 +1109,7 @@ fun MainScreen(
                         }
                     }
 
-                    // Spacious Bottom Capture Bar (56dp+ height, large Add & Time buttons)
+                    // Spacious ASCII Bottom Capture Bar (56dp+ height, large Add & Time buttons)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -805,7 +1129,7 @@ fun MainScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "+ Time",
+                                text = "[⏰+TIME]",
                                 color = palette.priorityB,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp,
@@ -824,9 +1148,9 @@ fun MainScreen(
                         ) {
                             if (smartInput.isEmpty()) {
                                 Text(
-                                    text = "Add task (e.g. check chocotat at factory in 1m)...",
+                                    text = ">_ task (e.g. check chocotat at factory in 10s)...",
                                     color = palette.fgMuted,
-                                    fontSize = 14.sp,
+                                    fontSize = 13.sp,
                                     fontFamily = fontFamily,
                                     maxLines = 1
                                 )
@@ -854,15 +1178,16 @@ fun MainScreen(
                             modifier = Modifier
                                 .heightIn(min = 48.dp)
                                 .background(palette.reminder)
+                                .border(1.dp, palette.fg)
                                 .clickable { submitSmartAdd() }
-                                .padding(horizontal = 18.dp),
+                                .padding(horizontal = 16.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "Add",
+                                text = "[+ADD ↵]",
                                 color = palette.bg,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 15.sp,
+                                fontSize = 14.sp,
                                 fontFamily = fontFamily
                             )
                         }
@@ -879,7 +1204,7 @@ fun MainScreen(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Spacious Note Selector Pills
+                    // Spacious ASCII Note Selector Pills
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -891,7 +1216,7 @@ fun MainScreen(
                             val sel = n.filename == currentNote?.filename
                             Box(
                                 modifier = Modifier
-                                    .heightIn(min = 44.dp)
+                                    .heightIn(min = 46.dp)
                                     .background(if (sel) palette.project else palette.bgElevated)
                                     .border(1.dp, if (sel) palette.project else palette.border)
                                     .clickable {
@@ -901,14 +1226,14 @@ fun MainScreen(
                                         selectedNoteName = n.filename
                                         noteEditMode = false
                                     }
-                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = n.filename,
+                                    text = if (sel) "[[ 📄 ${n.filename} ]]" else "[ ${n.filename} ]",
                                     color = if (sel) palette.bg else palette.fg,
                                     fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
-                                    fontSize = 14.sp,
+                                    fontSize = 13.sp,
                                     fontFamily = fontFamily
                                 )
                             }
@@ -916,7 +1241,7 @@ fun MainScreen(
 
                         Box(
                             modifier = Modifier
-                                .heightIn(min = 44.dp)
+                                .heightIn(min = 46.dp)
                                 .background(palette.reminder)
                                 .clickable {
                                     val name = "note-${notes.size + 1}.md"
@@ -927,14 +1252,14 @@ fun MainScreen(
                                     noteDraftText = initialBody
                                     noteEditMode = true
                                 }
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "+ New Note",
+                                text = "[ + NEW.MD ]",
                                 color = palette.bg,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
+                                fontSize = 13.sp,
                                 fontFamily = fontFamily
                             )
                         }
@@ -943,55 +1268,63 @@ fun MainScreen(
                     if (currentNote != null) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (notes.size > 1) {
+                            Text(
+                                text = "┌─[ BUFFER: ${currentNote.filename} ]─┐",
+                                color = palette.project,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                fontFamily = fontFamily
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (notes.size > 1) {
+                                    Box(
+                                        modifier = Modifier
+                                            .heightIn(min = 44.dp)
+                                            .background(palette.bgElevated)
+                                            .border(1.dp, palette.priorityA)
+                                            .clickable {
+                                                val updated = storageRepo.deleteNote(currentNote.filename)
+                                                notes = updated
+                                                selectedNoteName = updated.firstOrNull()?.filename ?: ""
+                                                noteEditMode = false
+                                                statusBanner = "[✕ DELETED] ${currentNote.filename}"
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(text = "[✕ DEL]", color = palette.priorityA, fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = fontFamily)
+                                    }
+                                }
+
                                 Box(
                                     modifier = Modifier
-                                        .heightIn(min = 42.dp)
-                                        .background(palette.bgElevated)
-                                        .border(1.dp, palette.priorityA)
+                                        .heightIn(min = 44.dp)
+                                        .background(if (noteEditMode) palette.reminder else palette.project)
                                         .clickable {
-                                            val updated = storageRepo.deleteNote(currentNote.filename)
-                                            notes = updated
-                                            selectedNoteName = updated.firstOrNull()?.filename ?: ""
-                                            noteEditMode = false
-                                            statusBanner = "Deleted ${currentNote.filename}"
+                                            if (noteEditMode) {
+                                                notes = storageRepo.saveNote(currentNote.filename, noteDraftText)
+                                                noteEditMode = false
+                                                statusBanner = "[✓ SAVED] ${currentNote.filename}"
+                                            } else {
+                                                noteDraftName = currentNote.filename
+                                                noteDraftText = currentNote.rawContent
+                                                noteEditMode = true
+                                            }
                                         }
                                         .padding(horizontal = 16.dp, vertical = 8.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text(text = "Delete Note", color = palette.priorityA, fontSize = 13.sp, fontFamily = fontFamily)
+                                    Text(
+                                        text = if (noteEditMode) "[✓ SAVE]" else "[✎ EDIT]",
+                                        color = palette.bg,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        fontFamily = fontFamily
+                                    )
                                 }
-                                Spacer(modifier = Modifier.width(10.dp))
-                            }
-
-                            Box(
-                                modifier = Modifier
-                                    .heightIn(min = 42.dp)
-                                    .background(if (noteEditMode) palette.reminder else palette.project)
-                                    .clickable {
-                                        if (noteEditMode) {
-                                            notes = storageRepo.saveNote(currentNote.filename, noteDraftText)
-                                            noteEditMode = false
-                                            statusBanner = "Saved ${currentNote.filename}"
-                                        } else {
-                                            noteDraftName = currentNote.filename
-                                            noteDraftText = currentNote.rawContent
-                                            noteEditMode = true
-                                        }
-                                    }
-                                    .padding(horizontal = 18.dp, vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = if (noteEditMode) "Done Editing" else "Edit Note",
-                                    color = palette.bg,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                    fontFamily = fontFamily
-                                )
                             }
                         }
 
@@ -1035,7 +1368,7 @@ fun MainScreen(
                                 currentNote.bodyContent.lines().forEach { line ->
                                     val isHeader = line.startsWith("#")
                                     Text(
-                                        text = line,
+                                        text = if (isHeader) "══ $line ══" else "│ $line",
                                         color = if (isHeader) palette.project else palette.fg,
                                         fontWeight = if (isHeader) FontWeight.Bold else FontWeight.Normal,
                                         fontSize = if (isHeader) (fontScaleSp + 2).sp else fontScaleSp.sp,
@@ -1059,7 +1392,7 @@ fun MainScreen(
                             if (gcalManager.hasCalendarPermissions()) {
                                 val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
                                 persistAndSchedule(syncedList)
-                                statusBanner = "Synced $count task(s) to Google Calendar"
+                                statusBanner = "[✓ GCAL] Synced $count task(s) to Google Calendar"
                             } else {
                                 calendarPermissionLauncher.launch(
                                     arrayOf(
@@ -1093,18 +1426,17 @@ fun MainScreen(
                                 doneLines = doneLines + completed.map { TodoParser.serializeLine(it) }
                                 storageRepo.saveDoneLines(doneLines)
                                 persistAndSchedule(tasks.filterNot { it.isCompleted })
-                                statusBanner = "Archived ${completed.size} completed task(s)"
+                                statusBanner = "[📦 ARCHIVED] ${completed.size} completed task(s) -> done.txt"
                             } else {
-                                statusBanner = "No completed tasks to archive"
+                                statusBanner = "[!] No completed tasks to archive"
                             }
                         },
                         onFireImmediateNotification = {
-                            scheduler.fireImmediateNotification(
-                                taskTitle = "Test reminder from tick.txt",
-                                rawSpec = "0m/n",
-                                typeCode = "n"
+                            triggerFullAlarmAndNotification(
+                                taskTitle = "check chocotat +chocotat @factory",
+                                rawSpec = "0m/a",
+                                taskId = "test_alarm"
                             )
-                            statusBanner = "Notification sent"
                         }
                     )
                 }
@@ -1114,9 +1446,10 @@ fun MainScreen(
 }
 
 /**
- * Clean, spacious, easy-to-tap Task Card with zero raw-tag clutter:
- * - 48dp+ checkbox touch area on the left
- * - Clear task title + clean pill badges for +project, @context, due date/time, and Google Calendar sync
+ * Spacious ASCII Box-Drawing Task Card:
+ * - Preserves generous 48dp+ touch targets and comfortable padding
+ * - Features rich ASCII terminal frames, `[ x ]` / `[   ]` ASCII checkboxes,
+ *   `[+project]`, `[@context]`, `[⏰ due]` tags, 1-tap `[🔔 ALARM]` trigger, and `[+GCAL]` sync.
  */
 @Composable
 private fun UsableTaskCard(
@@ -1125,161 +1458,217 @@ private fun UsableTaskCard(
     fontScaleSp: Int = fontSizeSp,
     onToggleDone: () -> Unit,
     onTapTask: () -> Unit,
+    onTriggerAlarmAndSnooze: () -> Unit,
     onSyncCalendar: () -> Unit
 ) {
     val palette = LocalTickPalette.current
     val fontFamily = LocalTickFontFamily.current
     val isSyncedToGcal = task.getTagValue("gcal") != null
+    val hasReminderOrDue = task.dueDate != null || task.reminderSpecs.isNotEmpty()
+    val lineNumFormatted = "%02d".format(task.lineNumber)
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(palette.bgElevated)
-            .border(1.dp, palette.border)
+            .border(1.dp, if (task.priority == 'A') palette.priorityA else palette.border)
             .clickable { onTapTask() }
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // Large 48dp x 48dp Checkbox Touch Target
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .clickable { onToggleDone() },
-            contentAlignment = Alignment.Center
+        // Top ASCII Box Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            Text(
+                text = "┌──[ #$lineNumFormatted ]────────────────────",
+                color = palette.fgMuted,
+                fontSize = 11.sp,
+                fontFamily = fontFamily
+            )
+            Text(
+                text = if (task.isCompleted) "[ STATUS: DONE ]──┐"
+                else if (hasReminderOrDue) "[ ⏰ ALARM READY ]──┐"
+                else "[ OPEN ]──┐",
+                color = if (task.isCompleted) palette.reminder else if (hasReminderOrDue) palette.priorityB else palette.fgMuted,
+                fontWeight = FontWeight.Bold,
+                fontSize = 11.sp,
+                fontFamily = fontFamily
+            )
+        }
+
+        // Main Interactive Row with 48dp+ Touch Targets
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Large 48dp x 48dp ASCII Checkbox Touch Target
             Box(
                 modifier = Modifier
-                    .size(26.dp)
+                    .size(width = 56.dp, height = 48.dp)
                     .background(if (task.isCompleted) palette.reminder else palette.bg)
-                    .border(2.dp, if (task.isCompleted) palette.reminder else palette.project),
-                contentAlignment = Alignment.Center
-            ) {
-                if (task.isCompleted) {
-                    Text(
-                        text = "✓",
-                        color = palette.bg,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        // Task Title & Clean Badges
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (task.priority != null) {
-                    val pColor = when (task.priority) {
-                        'A' -> palette.priorityA
-                        'B' -> palette.priorityB
-                        else -> palette.priorityC
-                    }
-                    Text(
-                        text = "(${task.priority})",
-                        color = pColor,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = fontScaleSp.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-                Text(
-                    text = task.description.ifEmpty { task.rawLine },
-                    color = if (task.isCompleted) palette.fgMuted else palette.fg,
-                    fontSize = fontScaleSp.sp,
-                    fontWeight = FontWeight.Medium,
-                    fontFamily = fontFamily,
-                    textDecoration = if (task.isCompleted) TextDecoration.LineThrough else TextDecoration.None
-                )
-            }
-
-            // Clean Metadata Pills (+project, @context, Due Date/Time)
-            if (task.projects.isNotEmpty() || task.contexts.isNotEmpty() || task.dueDate != null) {
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    task.dueDate?.let { d ->
-                        val timePart = task.dueTime?.let { " $it" } ?: ""
-                        Box(
-                            modifier = Modifier
-                                .background(palette.bg)
-                                .border(1.dp, palette.priorityB)
-                                .padding(horizontal = 8.dp, vertical = 3.dp)
-                        ) {
-                            Text(
-                                text = "$d$timePart",
-                                color = palette.priorityB,
-                                fontSize = 12.sp,
-                                fontFamily = fontFamily
-                            )
-                        }
-                    }
-                    task.projects.forEach { p ->
-                        Box(
-                            modifier = Modifier
-                                .background(palette.bg)
-                                .border(1.dp, palette.project)
-                                .padding(horizontal = 8.dp, vertical = 3.dp)
-                        ) {
-                            Text(
-                                text = "+$p",
-                                color = palette.project,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                fontFamily = fontFamily
-                            )
-                        }
-                    }
-                    task.contexts.forEach { c ->
-                        Box(
-                            modifier = Modifier
-                                .background(palette.bg)
-                                .border(1.dp, palette.contextTag)
-                                .padding(horizontal = 8.dp, vertical = 3.dp)
-                        ) {
-                            Text(
-                                text = "@$c",
-                                color = palette.contextTag,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                fontFamily = fontFamily
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 1-Tap Google Calendar Sync Button on Tasks with Due Dates
-        if (task.dueDate != null) {
-            Box(
-                modifier = Modifier
-                    .heightIn(min = 42.dp)
-                    .padding(start = 6.dp)
-                    .background(palette.bg)
-                    .border(1.dp, if (isSyncedToGcal) palette.reminder else palette.border)
-                    .clickable { onSyncCalendar() }
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                    .border(1.dp, if (task.isCompleted) palette.reminder else palette.project)
+                    .clickable { onToggleDone() },
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = if (isSyncedToGcal) "Synced" else "+ Cal",
-                    color = if (isSyncedToGcal) palette.reminder else palette.contextTag,
+                    text = if (task.isCompleted) "[ x ]" else "[   ]",
+                    color = if (task.isCompleted) palette.bg else palette.project,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp,
+                    fontSize = 14.sp,
                     fontFamily = fontFamily
                 )
             }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            // Task Title & ASCII Badges
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (task.priority != null) {
+                        val pColor = when (task.priority) {
+                            'A' -> palette.priorityA
+                            'B' -> palette.priorityB
+                            else -> palette.priorityC
+                        }
+                        Text(
+                            text = "[(${task.priority})]",
+                            color = pColor,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = fontScaleSp.sp,
+                            fontFamily = fontFamily
+                        )
+                    }
+                    Text(
+                        text = task.description.ifEmpty { task.rawLine },
+                        color = if (task.isCompleted) palette.fgMuted else palette.fg,
+                        fontSize = fontScaleSp.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = fontFamily,
+                        textDecoration = if (task.isCompleted) TextDecoration.LineThrough else TextDecoration.None
+                    )
+                }
+
+                // ASCII Metadata Badges ([⏰ due], [+project], [@context])
+                if (task.projects.isNotEmpty() || task.contexts.isNotEmpty() || task.dueDate != null) {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        task.dueDate?.let { d ->
+                            val timePart = task.dueTime?.let { " @$it" } ?: ""
+                            Box(
+                                modifier = Modifier
+                                    .background(palette.bg)
+                                    .border(1.dp, palette.priorityB)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "[⏰ $d$timePart]",
+                                    color = palette.priorityB,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    fontFamily = fontFamily
+                                )
+                            }
+                        }
+                        task.projects.forEach { p ->
+                            Box(
+                                modifier = Modifier
+                                    .background(palette.bg)
+                                    .border(1.dp, palette.project)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "[+$p]",
+                                    color = palette.project,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    fontFamily = fontFamily
+                                )
+                            }
+                        }
+                        task.contexts.forEach { c ->
+                            Box(
+                                modifier = Modifier
+                                    .background(palette.bg)
+                                    .border(1.dp, palette.contextTag)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "[@$c]",
+                                    color = palette.contextTag,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    fontFamily = fontFamily
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Right-side Quick ASCII Action Buttons (Alarm/Snooze & Google Calendar)
+            Column(
+                modifier = Modifier.padding(start = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                Box(
+                    modifier = Modifier
+                        .heightIn(min = 38.dp)
+                        .background(palette.bg)
+                        .border(1.dp, palette.priorityA)
+                        .clickable { onTriggerAlarmAndSnooze() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "[🔔 ALARM]",
+                        color = palette.priorityA,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        fontFamily = fontFamily
+                    )
+                }
+
+                if (task.dueDate != null) {
+                    Box(
+                        modifier = Modifier
+                            .heightIn(min = 38.dp)
+                            .background(palette.bg)
+                            .border(1.dp, if (isSyncedToGcal) palette.reminder else palette.contextTag)
+                            .clickable { onSyncCalendar() }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isSyncedToGcal) "[✓GCAL]" else "[+GCAL]",
+                            color = if (isSyncedToGcal) palette.reminder else palette.contextTag,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            fontFamily = fontFamily
+                        )
+                    }
+                }
+            }
         }
+
+        // Bottom ASCII Box Footer
+        Text(
+            text = "└──────────────────────────────────────────┘",
+            color = palette.fgMuted,
+            fontSize = 11.sp,
+            fontFamily = fontFamily
+        )
     }
 }

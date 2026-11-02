@@ -21,8 +21,8 @@ import java.time.format.DateTimeFormatter
 /**
  * First-class Android NotificationCompat & Full-Screen Alarm receiver:
  * - Creates a MAX-importance alarm channel with alarm audio attributes, vibration, and lockscreen visibility
- * - Fires BOTH an ASCII-formatted system notification AND launches `FullScreenAlarmActivity`
- *   so every task reminder wakes the screen with full-screen ASCII alarm + granular snooze (sec/min/hr/day/wk/mo).
+ * - Fires BOTH a plain-text ASCII system notification AND launches `FullScreenAlarmActivity`
+ *   with granular snooze (sec / min / hr / day / wk / mo).
  */
 class AlarmBroadcastReceiver : BroadcastReceiver() {
 
@@ -64,19 +64,6 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
 
-                val openAppIntent = PendingIntent.getActivity(
-                    context,
-                    notifId,
-                    Intent(context, MainActivity::class.java).apply {
-                        flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                        putExtra("extra_open_alarm_task_title", taskTitle)
-                        putExtra("extra_open_alarm_raw_spec", rawSpec)
-                        putExtra("extra_open_alarm_task_id", taskId)
-                        putExtra("extra_open_alarm_reminder_id", reminderId)
-                    },
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-
                 fun buildActionIntent(actionStr: String, preset: String?, reqOffset: Int): PendingIntent {
                     val aIntent = Intent(context, AlarmBroadcastReceiver::class.java).apply {
                         action = actionStr
@@ -96,18 +83,16 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 }
 
                 val asciiBigText = buildString {
-                    appendLine("+====================================+")
-                    appendLine("| [!!] TICK.TXT TASK ALARM RINGING   |")
-                    appendLine("+====================================+")
-                    appendLine("| >> $taskTitle")
-                    appendLine("| >> SPEC: rem:$rawSpec")
-                    append("+------------------------------------+")
+                    appendLine("┌─ task due now")
+                    appendLine("│  $taskTitle")
+                    appendLine("├─ spec : rem:$rawSpec")
+                    append("└─ tap to open full-screen snooze (sec/min/hr/day/wk/mo)")
                 }
 
                 val builder = NotificationCompat.Builder(context, CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                    .setContentTitle("[⏰ ALARM] $taskTitle")
-                    .setContentText("rem:$rawSpec :: Tap for Full-Screen ASCII Alarm & Granular Snooze")
+                    .setContentTitle("[!] $taskTitle")
+                    .setContentText("rem:$rawSpec // tap for granular snooze or mark [x] done")
                     .setStyle(NotificationCompat.BigTextStyle().bigText(asciiBigText))
                     .setPriority(NotificationCompat.PRIORITY_MAX)
                     .setCategory(NotificationCompat.CATEGORY_ALARM)
@@ -119,28 +104,26 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                     .setAutoCancel(true)
                     .addAction(
                         0,
-                        "[x] DONE",
+                        "[x] done",
                         buildActionIntent(ReminderScheduler.ACTION_MARK_DONE, null, 1)
                     )
                     .addAction(
                         0,
-                        "[+1m]",
-                        buildActionIntent(ReminderScheduler.ACTION_SNOOZE_REMINDER, "1m", 2)
+                        "[+5m]",
+                        buildActionIntent(ReminderScheduler.ACTION_SNOOZE_REMINDER, "5m", 2)
                     )
                     .addAction(
                         0,
-                        "[⏰ SNOOZE]",
+                        "[snooze...]",
                         fullScreenPendingIntent
                     )
 
                 nm.notify(notifId, builder.build())
 
-                // Also launch FullScreenAlarmActivity directly when app is in foreground or background allowed
                 runCatching {
                     context.startActivity(fullScreenIntent)
                 }
 
-                // Notify in-app UI if MainScreen is open so it can also show the in-app ASCII alarm banner/overlay
                 context.sendBroadcast(
                     Intent(ReminderScheduler.ACTION_ALARM_FIRED_UI).apply {
                         setPackage(context.packageName)
@@ -170,7 +153,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 context.sendBroadcast(
                     Intent(ReminderScheduler.ACTION_TASKS_UPDATED).apply {
                         setPackage(context.packageName)
-                        putExtra("extra_status_msg", "Snoozed \"$taskTitle\" (+$preset -> $fmtTime)")
+                        putExtra("extra_status_msg", "snoozed +$preset -> $fmtTime")
                     }
                 )
             }
@@ -193,7 +176,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 context.sendBroadcast(
                     Intent(ReminderScheduler.ACTION_TASKS_UPDATED).apply {
                         setPackage(context.packageName)
-                        putExtra("extra_status_msg", "[x] Marked \"$taskTitle\" DONE")
+                        putExtra("extra_status_msg", "[x] completed: $taskTitle")
                     }
                 )
             }
@@ -224,7 +207,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 "tick.txt Full-Screen Alarms & Reminders",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Full-screen ASCII alarms and task notifications from tick.txt"
+                description = "Full-screen plain-text alarms and task notifications from tick.txt"
                 enableVibration(true)
                 vibrationPattern = longArrayOf(0, 400, 200, 400, 200, 600)
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC

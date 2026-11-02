@@ -19,6 +19,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -39,11 +40,9 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
 /**
- * Full-screen lock-screen & pop-up ASCII Alarm Activity:
- * - Wakes the screen over the lockscreen
- * - Plays alarm sound + vibration until muted, snoozed, dismissed, or marked done
- * - Features full ASCII box-drawing art and granular snooze across
- *   Seconds, Minutes, Hours, Days, Weeks, and Months.
+ * Full-screen lock-screen & pop-up plain-text ASCII Alarm Activity.
+ * Uses pure typographic ASCII components (`[!]`, `├─`, `└─`, `(•)`, `[-]`, `[+]`)
+ * with generous 48dp+ touch targets and zero visual clutter.
  */
 class FullScreenAlarmActivity : ComponentActivity() {
 
@@ -180,9 +179,9 @@ class FullScreenAlarmActivity : ComponentActivity() {
 }
 
 /**
- * Reusable Full-Screen ASCII Alarm & Granular Snooze Surface (used both in FullScreenAlarmActivity
- * and as an in-app full-screen overlay inside MainScreen).
- * Lets the user select Seconds, Minutes, Hours, Days, Weeks, or Months with generous 48dp+ touch targets.
+ * Pure Plain-Text + ASCII Component Full-Screen Alarm Surface.
+ * Supports granular snooze across Seconds (sec), Minutes (min), Hours (hr),
+ * Days (day), Weeks (wk), and Months (mo).
  */
 @Composable
 fun AsciiFullScreenAlarmSurface(
@@ -200,13 +199,13 @@ fun AsciiFullScreenAlarmSurface(
     var selectedUnit by remember { mutableStateOf(SnoozeUnit.MINUTES) }
     var snoozeAmount by remember { mutableStateOf(5) }
     var isSoundMuted by remember { mutableStateOf(false) }
-    var pulseFrame by remember { mutableStateOf(0) }
+    var blink by remember { mutableStateOf(true) }
     var currentNow by remember { mutableStateOf(ZonedDateTime.now()) }
 
     LaunchedEffect(Unit) {
         while (true) {
-            delay(500L)
-            pulseFrame = (pulseFrame + 1) % 2
+            delay(600L)
+            blink = !blink
             currentNow = ZonedDateTime.now()
         }
     }
@@ -225,8 +224,6 @@ fun AsciiFullScreenAlarmSurface(
         currentNow.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
     }
 
-    val bellArt = if (pulseFrame == 0) "(( 🔔 !! ALARM RINGING !! 🔔 ))" else "<< 🔔 !! ALARM RINGING !! 🔔 >>"
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -234,112 +231,86 @@ fun AsciiFullScreenAlarmSurface(
             .statusBarsPadding()
             .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .padding(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.SpaceBetween
     ) {
         // =====================================================================
-        // 1. ASCII ART ALARM BANNER
+        // 1. TOP TELEMETRY BAR
         // =====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.bgElevated)
-                .border(2.dp, palette.priorityA)
-                .padding(14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = "╔══════════════════════════════════════╗",
-                color = palette.priorityA,
-                fontSize = 12.sp,
-                fontFamily = fontFamily
-            )
-            Text(
-                text = bellArt,
-                color = palette.priorityA,
-                fontWeight = FontWeight.Bold,
-                fontSize = (fontSizeSp + 1).sp,
-                fontFamily = fontFamily
-            )
-            Text(
-                text = "║   T I C K . T X T  //  T A S K  DUE   ║",
-                color = palette.fg,
-                fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
-                fontFamily = fontFamily
-            )
-            Text(
-                text = "╚══════[ CLOCK: $clockFormatted ]══════╝",
-                color = palette.priorityB,
-                fontSize = 12.sp,
-                fontFamily = fontFamily
-            )
-        }
-
-        // =====================================================================
-        // 2. ASCII TASK PAYLOAD BOX
-        // =====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.bgElevated)
-                .border(1.dp, palette.project)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "┌──[ TASK PAYLOAD ]──┐",
-                    color = palette.project,
+                    text = if (blink) "[!] ALARM RINGING // $clockFormatted" else "[ ] ALARM RINGING // $clockFormatted",
+                    color = palette.priorityA,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
+                    fontSize = 14.sp,
                     fontFamily = fontFamily
                 )
+
                 Box(
                     modifier = Modifier
-                        .heightIn(min = 38.dp)
-                        .background(palette.bg)
-                        .border(1.dp, if (isSoundMuted) palette.fgMuted else palette.priorityB)
+                        .heightIn(min = 42.dp)
+                        .border(1.dp, palette.border)
                         .clickable {
                             isSoundMuted = true
                             onMuteSound()
                         }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (isSoundMuted) "[ 🔇 MUTED ]" else "[ 🔊 MUTE TONE ]",
+                        text = if (isSoundMuted) "[sound: muted]" else "[sound: on]",
                         color = if (isSoundMuted) palette.fgMuted else palette.priorityB,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
+                        fontSize = 13.sp,
                         fontFamily = fontFamily
                     )
                 }
             }
+            HorizontalDivider(thickness = 1.dp, color = palette.border)
+        }
 
+        // =====================================================================
+        // 2. PLAIN-TEXT TASK TREE PAYLOAD
+        // =====================================================================
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             Text(
-                text = ">> $taskTitle",
+                text = "┌─ task due now",
+                color = palette.fgMuted,
+                fontSize = 13.sp,
+                fontFamily = fontFamily
+            )
+            Text(
+                text = "│  $taskTitle",
                 color = palette.fg,
                 fontWeight = FontWeight.Bold,
                 fontSize = (fontSizeSp + 6).sp,
                 fontFamily = fontFamily
             )
-
             Text(
-                text = "└─[ SPEC: rem:$rawSpec ]──[ MODE: FULL-SCREEN ALARM ]─┘",
+                text = "├─ spec : rem:$rawSpec",
                 color = palette.reminder,
-                fontSize = 12.sp,
+                fontSize = 14.sp,
+                fontFamily = fontFamily
+            )
+            Text(
+                text = "└─ wake : RTC_WAKEUP + fullScreenIntent",
+                color = palette.fgMuted,
+                fontSize = 13.sp,
                 fontFamily = fontFamily
             )
         }
 
         // =====================================================================
-        // 3. GRANULAR ASCII SNOOZE MATRIX (SEC | MIN | HR | DAY | WK | MO)
+        // 3. GRANULAR ASCII SNOOZE SELECTOR (sec | min | hr | day | wk | mo)
         // =====================================================================
         Column(
             modifier = Modifier
@@ -347,17 +318,17 @@ fun AsciiFullScreenAlarmSurface(
                 .background(palette.bgElevated)
                 .border(1.dp, palette.border)
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text(
-                text = "╔══[ GRANULAR SNOOZE: SEC / MIN / HR / DAY / WK / MO ]══╗",
+                text = "┌─ snooze unit (sec / min / hr / day / wk / mo)",
                 color = palette.project,
                 fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
+                fontSize = 13.sp,
                 fontFamily = fontFamily
             )
 
-            // Unit Selector Grid (2 rows of 3 large 48dp+ ASCII buttons)
+            // 6 Unit Radio Controls: (•) min  ( ) sec ...
             val allUnits = SnoozeUnit.entries
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 allUnits.chunked(3).forEach { rowUnits ->
@@ -371,7 +342,7 @@ fun AsciiFullScreenAlarmSurface(
                                 modifier = Modifier
                                     .weight(1f)
                                     .heightIn(min = 48.dp)
-                                    .background(if (isSelected) palette.project else palette.bg)
+                                    .background(palette.bg)
                                     .border(1.dp, if (isSelected) palette.project else palette.border)
                                     .clickable {
                                         selectedUnit = unit
@@ -379,14 +350,14 @@ fun AsciiFullScreenAlarmSurface(
                                             snoozeAmount = unit.quickValues.first()
                                         }
                                     }
-                                    .padding(vertical = 10.dp),
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = if (isSelected) "[[ ${unit.asciiLabel} ]]" else "[ ${unit.asciiLabel} ]",
-                                    color = if (isSelected) palette.bg else palette.fg,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
+                                    text = if (isSelected) "(•) ${unit.asciiLabel.lowercase()}" else "( ) ${unit.asciiLabel.lowercase()}",
+                                    color = if (isSelected) palette.project else palette.fgMuted,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = 13.sp,
                                     fontFamily = fontFamily
                                 )
                             }
@@ -395,7 +366,7 @@ fun AsciiFullScreenAlarmSurface(
                 }
             }
 
-            // Stepper Row: [ - ]  [ AMOUNT + UNIT ]  [ + ]
+            // ASCII Stepper: [ - ]   05 min   [ + ]
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -403,15 +374,15 @@ fun AsciiFullScreenAlarmSurface(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(width = 64.dp, height = 50.dp)
+                        .size(width = 64.dp, height = 48.dp)
                         .background(palette.bg)
-                        .border(1.dp, palette.priorityA)
+                        .border(1.dp, palette.border)
                         .clickable { snoozeAmount = (snoozeAmount - 1).coerceAtLeast(1) },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "[ -1 ]",
-                        color = palette.priorityA,
+                        text = "[ - ]",
+                        color = palette.fg,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
                         fontFamily = fontFamily
@@ -421,13 +392,13 @@ fun AsciiFullScreenAlarmSurface(
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .height(50.dp)
+                        .height(48.dp)
                         .background(palette.bg)
-                        .border(1.dp, palette.reminder),
+                        .border(1.dp, palette.border),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = ">> $snoozeAmount ${selectedUnit.fullName.uppercase()} <<",
+                        text = "+$snoozeAmount ${selectedUnit.fullName.lowercase()}",
                         color = palette.reminder,
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp,
@@ -437,15 +408,15 @@ fun AsciiFullScreenAlarmSurface(
 
                 Box(
                     modifier = Modifier
-                        .size(width = 64.dp, height = 50.dp)
+                        .size(width = 64.dp, height = 48.dp)
                         .background(palette.bg)
-                        .border(1.dp, palette.reminder)
+                        .border(1.dp, palette.border)
                         .clickable { snoozeAmount = (snoozeAmount + 1).coerceAtMost(365) },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "[ +1 ]",
-                        color = palette.reminder,
+                        text = "[ + ]",
+                        color = palette.fg,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
                         fontFamily = fontFamily
@@ -465,16 +436,16 @@ fun AsciiFullScreenAlarmSurface(
                     Box(
                         modifier = Modifier
                             .heightIn(min = 44.dp)
-                            .background(if (activeVal) palette.priorityB else palette.bg)
+                            .background(palette.bg)
                             .border(1.dp, if (activeVal) palette.priorityB else palette.border)
                             .clickable { snoozeAmount = qVal }
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "[ $qVal${selectedUnit.code} ]",
-                            color = if (activeVal) palette.bg else palette.fg,
-                            fontWeight = FontWeight.Bold,
+                            text = if (activeVal) "[*$qVal${selectedUnit.code}]" else "[+$qVal${selectedUnit.code}]",
+                            color = if (activeVal) palette.priorityB else palette.fgMuted,
+                            fontWeight = if (activeVal) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 13.sp,
                             fontFamily = fontFamily
                         )
@@ -482,73 +453,50 @@ fun AsciiFullScreenAlarmSurface(
                 }
             }
 
-            // Big Confirm Custom Snooze Button
+            // Confirm Snooze Trigger
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 54.dp)
-                    .background(palette.project)
-                    .border(2.dp, palette.fg)
+                    .heightIn(min = 52.dp)
+                    .background(palette.bg)
+                    .border(1.dp, palette.project)
                     .clickable {
                         onSnoozeWithPreset(selectedUnit.toPresetSpec(snoozeAmount))
                     }
-                    .padding(vertical = 14.dp, horizontal = 12.dp),
+                    .padding(vertical = 12.dp, horizontal = 14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "╔══[ 💤 SNOOZE +$snoozeAmount ${selectedUnit.asciiLabel} ]══╗",
-                        color = palette.bg,
+                        text = "[ snooze +$snoozeAmount${selectedUnit.code} -> $previewFormatted ]",
+                        color = palette.project,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        fontFamily = fontFamily
-                    )
-                    Text(
-                        text = "NEXT FIRE -> $previewFormatted",
-                        color = palette.bg,
-                        fontSize = 11.sp,
+                        fontSize = 14.sp,
                         fontFamily = fontFamily
                     )
                 }
             }
 
-            // 1-Tap Instant Presets Across All Units
-            Text(
-                text = "├─[ 1-TAP INSTANT SNOOZE PRESETS ]─────────┤",
-                color = palette.fgMuted,
-                fontSize = 12.sp,
-                fontFamily = fontFamily
-            )
+            // 1-Tap Cross-Unit Presets
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf(
-                    "10s" to "[+10 SEC]",
-                    "30s" to "[+30 SEC]",
-                    "1m" to "[+1 MIN]",
-                    "5m" to "[+5 MIN]",
-                    "15m" to "[+15 MIN]",
-                    "1h" to "[+1 HR]",
-                    "1d" to "[+1 DAY]",
-                    "1w" to "[+1 WK]",
-                    "1mo" to "[+1 MO]"
-                ).forEach { (spec, label) ->
+                listOf("10s", "30s", "1m", "5m", "15m", "1h", "1d", "1w", "1mo").forEach { spec ->
                     Box(
                         modifier = Modifier
-                            .heightIn(min = 44.dp)
+                            .heightIn(min = 42.dp)
                             .background(palette.bg)
-                            .border(1.dp, palette.contextTag)
+                            .border(1.dp, palette.border)
                             .clickable { onSnoozeWithPreset(spec) }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = label,
+                            text = "[+$spec]",
                             color = palette.contextTag,
-                            fontWeight = FontWeight.Bold,
                             fontSize = 13.sp,
                             fontFamily = fontFamily
                         )
@@ -557,8 +505,10 @@ fun AsciiFullScreenAlarmSurface(
             }
         }
 
+        Spacer(modifier = Modifier.height(14.dp))
+
         // =====================================================================
-        // 4. BOTTOM PRIMARY ALARM ACTIONS: [ ✕ DISMISS ]  &  [ x MARK DONE ]
+        // 4. BOTTOM PRIMARY ACTIONS: [ dismiss ]   &   [ x mark done ]
         // =====================================================================
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -567,18 +517,18 @@ fun AsciiFullScreenAlarmSurface(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .heightIn(min = 56.dp)
+                    .heightIn(min = 54.dp)
                     .background(palette.bgElevated)
-                    .border(2.dp, palette.fgMuted)
+                    .border(1.dp, palette.border)
                     .clickable { onDismiss() }
                     .padding(vertical = 14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "[ ✕ DISMISS ]",
-                    color = palette.fg,
+                    text = "[ dismiss alarm ]",
+                    color = palette.fgMuted,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
+                    fontSize = 14.sp,
                     fontFamily = fontFamily
                 )
             }
@@ -586,18 +536,18 @@ fun AsciiFullScreenAlarmSurface(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .heightIn(min = 56.dp)
-                    .background(palette.reminder)
-                    .border(2.dp, palette.fg)
+                    .heightIn(min = 54.dp)
+                    .background(palette.bgElevated)
+                    .border(1.dp, palette.reminder)
                     .clickable { onMarkDone() }
                     .padding(vertical = 14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "[ x COMPLETE ]",
-                    color = palette.bg,
+                    text = "[x mark done]",
+                    color = palette.reminder,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
+                    fontSize = 14.sp,
                     fontFamily = fontFamily
                 )
             }

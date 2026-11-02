@@ -17,8 +17,9 @@ data class PersistedSettings(
     val fontMode: FontMode = FontMode.MONOSPACE,
     val fontSizeSp: Int = 16,
     val autoSyncGoogleCalendar: Boolean = true,
-    val defaultTimedReminder: String = "0m/n",
-    val defaultDateOnlyReminder: String = "09:00/n",
+    val alarmMutedByDefault: Boolean = true,
+    val defaultTimedReminder: String = "0m/a",
+    val defaultDateOnlyReminder: String = "09:00/a",
     val customSafUri: String? = null
 )
 
@@ -43,7 +44,7 @@ class TickStorageRepository(private val context: Context) {
     fun ensureInitialized() {
         if (!todoFile.exists()) {
             val initialTodo = listOf(
-                "2026-11-02 check chocotat +chocotat @factory due:2026-11-02 duetime:09:00 rem:0m/n",
+                "2026-11-02 check chocotat +chocotat @factory due:2026-11-02 duetime:09:00 rem:0m/a",
                 "(A) 2026-11-02 ship quarterly invoice +invoice @office due:2026-11-02 duetime:17:00 rem:0m/a/svr",
                 "2026-11-02 review architecture notes +architecture @desk note:architecture.md"
             ).joinToString("\n") + "\n"
@@ -62,7 +63,7 @@ class TickStorageRepository(private val context: Context) {
             notesRepo.saveNote(
                 "architecture.md",
                 "# tick.txt storage notes\n\n- todo.txt and done.txt follow the official spec.\n- tick.rules.txt holds smart-add rules.\n- .tick/alarm-state.json stores active snoozes.",
-                listOf("2026-11-04@09:00/n")
+                listOf("2026-11-04@09:00/a")
             )
             notesRepo.saveNote(
                 "packing-list.txt",
@@ -138,8 +139,10 @@ class TickStorageRepository(private val context: Context) {
         val fontStr = prefs.getString(KEY_FONT_MODE, FontMode.MONOSPACE.name) ?: FontMode.MONOSPACE.name
         val sizeSp = prefs.getInt(KEY_FONT_SIZE, 16)
         val autoSyncCal = prefs.getBoolean(KEY_AUTO_GCAL, true)
-        val timedRem = prefs.getString(KEY_TIMED_REM, "0m/n") ?: "0m/n"
-        val dateOnlyRem = prefs.getString(KEY_DATE_REM, "09:00/n") ?: "09:00/n"
+        val alarmMutedDef = prefs.getBoolean(KEY_ALARM_MUTED_DEFAULT, true)
+        val rawTimedRem = prefs.getString(KEY_TIMED_REM, "0m/a") ?: "0m/a"
+        val timedRem = if (rawTimedRem == "0m/n") "0m/a" else rawTimedRem
+        val dateOnlyRem = prefs.getString(KEY_DATE_REM, "09:00/a") ?: "09:00/a"
         val safUri = prefs.getString(KEY_SAF_URI, null)
 
         return PersistedSettings(
@@ -147,6 +150,7 @@ class TickStorageRepository(private val context: Context) {
             fontMode = runCatching { FontMode.valueOf(fontStr) }.getOrDefault(FontMode.MONOSPACE),
             fontSizeSp = sizeSp,
             autoSyncGoogleCalendar = autoSyncCal,
+            alarmMutedByDefault = alarmMutedDef,
             defaultTimedReminder = timedRem,
             defaultDateOnlyReminder = dateOnlyRem,
             customSafUri = safUri
@@ -159,6 +163,7 @@ class TickStorageRepository(private val context: Context) {
             .putString(KEY_FONT_MODE, settings.fontMode.name)
             .putInt(KEY_FONT_SIZE, settings.fontSizeSp)
             .putBoolean(KEY_AUTO_GCAL, settings.autoSyncGoogleCalendar)
+            .putBoolean(KEY_ALARM_MUTED_DEFAULT, settings.alarmMutedByDefault)
             .putString(KEY_TIMED_REM, settings.defaultTimedReminder)
             .putString(KEY_DATE_REM, settings.defaultDateOnlyReminder)
             .putString(KEY_SAF_URI, settings.customSafUri)
@@ -197,5 +202,6 @@ class TickStorageRepository(private val context: Context) {
         private const val KEY_DATE_REM = "pref_date_rem"
         private const val KEY_SAF_URI = "pref_saf_uri"
         private const val KEY_AUTO_GCAL = "pref_auto_gcal"
+        private const val KEY_ALARM_MUTED_DEFAULT = "pref_alarm_muted_default"
     }
 }

@@ -21,24 +21,33 @@ enum class ThemeMode {
     ALUCARD_LIGHT
 }
 
-/**
- * Semantic tokens calibrated for >= WCAG AA contrast on Dracula (#282A36) and Alucard (#FFFBEB).
- */
+enum class FontMode(val label: String) {
+    MONOSPACE("monospace"),
+    SYSTEM_SANS("system font (sans)"),
+    SYSTEM_SERIF("system serif");
+
+    fun toComposeFontFamily(): FontFamily = when (this) {
+        MONOSPACE -> FontFamily.Monospace
+        SYSTEM_SANS -> FontFamily.Default
+        SYSTEM_SERIF -> FontFamily.Serif
+    }
+}
+
 @Immutable
 data class TickSemanticPalette(
     val isDark: Boolean,
     val bg: Color,
     val bgElevated: Color,
     val fg: Color,
-    val fgMuted: Color,       // Boosted to #9499B8 on Dracula (5.2:1) & #595649 on Alucard (6.8:1)
+    val fgMuted: Color,
     val border: Color,
-    val priorityA: Color,     // Red/Coral for (A) & overdue
-    val priorityB: Color,     // Orange/Amber for (B) & due today
-    val priorityC: Color,     // Yellow/Gold for (C)
-    val project: Color,       // Purple for +project
-    val contextTag: Color,    // Cyan/Teal for @context
-    val reminder: Color,      // Green for rem: & cursor block
-    val noteLink: Color       // Pink/Magenta for note:
+    val priorityA: Color,
+    val priorityB: Color,
+    val priorityC: Color,
+    val project: Color,
+    val contextTag: Color,
+    val reminder: Color,
+    val noteLink: Color
 )
 
 val DraculaPalette = TickSemanticPalette(
@@ -74,28 +83,29 @@ val AlucardPalette = TickSemanticPalette(
 )
 
 val LocalTickPalette = staticCompositionLocalOf { DraculaPalette }
+val LocalTickFontFamily = staticCompositionLocalOf<FontFamily> { FontFamily.Monospace }
 
-val TickMonospaceTypography = Typography(
+fun buildTickTypography(fontFamily: FontFamily) = Typography(
     headlineMedium = TextStyle(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = fontFamily,
         fontWeight = FontWeight.Bold,
         fontSize = 18.sp,
         lineHeight = 24.sp
     ),
     bodyLarge = TextStyle(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = fontFamily,
         fontWeight = FontWeight.Normal,
         fontSize = 14.sp,
         lineHeight = 20.sp
     ),
     bodyMedium = TextStyle(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = fontFamily,
         fontWeight = FontWeight.Normal,
         fontSize = 13.sp,
         lineHeight = 18.sp
     ),
     labelSmall = TextStyle(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = fontFamily,
         fontWeight = FontWeight.Medium,
         fontSize = 11.sp,
         lineHeight = 15.sp
@@ -105,6 +115,7 @@ val TickMonospaceTypography = Typography(
 @Composable
 fun TickTxtTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
+    fontMode: FontMode = FontMode.MONOSPACE,
     content: @Composable () -> Unit
 ) {
     val useDark = when (themeMode) {
@@ -113,6 +124,7 @@ fun TickTxtTheme(
         ThemeMode.ALUCARD_LIGHT -> false
     }
     val palette = if (useDark) DraculaPalette else AlucardPalette
+    val fontFamily = fontMode.toComposeFontFamily()
     val colorScheme = if (useDark) {
         darkColorScheme(
             background = palette.bg,
@@ -135,10 +147,13 @@ fun TickTxtTheme(
         )
     }
 
-    CompositionLocalProvider(LocalTickPalette provides palette) {
+    CompositionLocalProvider(
+        LocalTickPalette provides palette,
+        LocalTickFontFamily provides fontFamily
+    ) {
         MaterialTheme(
             colorScheme = colorScheme,
-            typography = TickMonospaceTypography,
+            typography = buildTickTypography(fontFamily),
             content = content
         )
     }

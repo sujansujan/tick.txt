@@ -1,10 +1,10 @@
 package com.ticktxt.app.core.reminders
 
-import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import kotlin.math.roundToLong
 
 enum class ReminderType(val code: String) {
     NOTIFICATION("n"),
@@ -21,7 +21,7 @@ enum class ReminderType(val code: String) {
 }
 
 sealed class ReminderTrigger {
-    /** Relative offset before the task's due timestamp (e.g. -15m, -1d, 0m). */
+    /** Relative offset in minutes from the task's due timestamp (e.g. -15m, -1.5h -> -90m, 0m). */
     data class Relative(val offsetMinutes: Long, val rawUnitSpec: String) : ReminderTrigger()
 
     /** Specific local date and time (`2026-11-03@09:00`). */
@@ -31,16 +31,6 @@ sealed class ReminderTrigger {
     data class AbsoluteTimeOnly(val time: LocalTime) : ReminderTrigger()
 }
 
-/**
- * Parsed representation of a single `rem:` tag value.
- *
- * Format: `rem:<trigger>[/<type>][/<flags>]`
- * Examples:
- * - `rem:-15m` -> 15 min before due, notification, default sound+vibrate
- * - `rem:-1d/n` -> 1 day before due, notification
- * - `rem:07:00/a/svr` -> 07:00 alarm with sound, vibration, repeat-until-ack
- * - `rem:2026-11-03@14:00/a/svm3` -> exact timestamp alarm, max 3 snoozes
- */
 data class ReminderSpec(
     val rawSpec: String,
     val trigger: ReminderTrigger,
@@ -75,7 +65,7 @@ data class ReminderSpec(
     }
 
     companion object {
-        private val RELATIVE_REGEX = Regex("^(-?\\d+)([mhdwMHDW])$")
+        private val RELATIVE_REGEX = Regex("^(-?\\d+(?:\\.\\d+)?)(mo|[mhdwyMHDWY])$", RegexOption.IGNORE_CASE)
         private val ABS_DT_REGEX = Regex("^(\\d{4}-\\d{2}-\\d{2})@(\\d{2}:\\d{2})$")
         private val ABS_TIME_REGEX = Regex("^(\\d{2}:\\d{2})$")
         private val MAX_SNOOZE_REGEX = Regex("m(\\d+)")
@@ -88,16 +78,18 @@ data class ReminderSpec(
             val trigger: ReminderTrigger = when {
                 RELATIVE_REGEX.matches(triggerPart) -> {
                     val m = RELATIVE_REGEX.matchEntire(triggerPart)!!
-                    val amount = m.groupValues[1].toLongOrNull() ?: return null
-                    val unit = m.groupValues[2].lowercase()[0]
+                    val amount = m.groupValues[1].toDoubleOrNull() ?: return null
+                    val unit = m.groupValues[2].lowercase()
                     val mult = when (unit) {
-                        'm' -> 1L
-                        'h' -> 60L
-                        'd' -> 1440L
-                        'w' -> 10080L
-                        else -> 1L
+                        "m" -> 1.0
+                        "h" -> 60.0
+                        "d" -> 1440.0
+                        "w" -> 10080.0
+                        "mo" -> 43200.0
+                        "y" -> 525600.0
+                        else -> 1.0
                     }
-                    ReminderTrigger.Relative(amount * mult, triggerPart.lowercase())
+                    ReminderTrigger.Relative((amount * mult).roundToLong(), triggerPart.lowercase())
                 }
                 ABS_DT_REGEX.matches(triggerPart) -> {
                     val m = ABS_DT_REGEX.matchEntire(triggerPart)!!

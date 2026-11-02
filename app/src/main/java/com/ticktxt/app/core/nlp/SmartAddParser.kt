@@ -5,9 +5,21 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.temporal.TemporalAdjusters
+import kotlin.math.roundToLong
 
 /**
  * Deterministic, 100% offline natural-language task & note parser.
+ *
+ * Supports:
+ * - Granular relative time/date offsets (including decimals & compound units):
+ *   "in 1 min", "in 2 hr", "in 1.5 hrs", "in 1 month", "in 1h 30m", "in 3 days", "in 2 weeks"
+ * - Leading reminder phrasing:
+ *   "remind me to check chocotat at factory in 1 min", "alarm me to ..."
+ * - Grammatical & rule-based @context inference:
+ *   "at factory" -> @factory, "at the office" -> @office, "on phone" -> @phone
+ * - Grammatical & rule-based +project inference:
+ *   Direct object / topic nouns after task verbs ("check chocotat" -> +chocotat)
+ *   plus user-defined keyword rules in `tick.rules.txt`.
  */
 object SmartAddParser {
 
@@ -26,6 +38,21 @@ object SmartAddParser {
         "april" to 4, "apr" to 4, "may" to 5, "june" to 6, "jun" to 6,
         "july" to 7, "jul" to 7, "august" to 8, "aug" to 8, "september" to 9, "sep" to 9, "sept" to 9,
         "october" to 10, "oct" to 10, "november" to 11, "nov" to 11, "december" to 12, "dec" to 12
+    )
+
+    private val NON_ENTITY_WORDS = setOf(
+        "a", "an", "the", "my", "our", "your", "his", "her", "their", "this", "that",
+        "these", "those", "some", "any", "all", "both", "each", "up", "out", "off",
+        "on", "in", "at", "to", "for", "with", "about", "into", "over", "after",
+        "before", "today", "tomorrow", "tonight", "noon", "midnight", "morning",
+        "afternoon", "evening", "night", "weekend", "week", "month", "year", "day",
+        "min", "mins", "minute", "minutes", "hr", "hrs", "hour", "hours", "sec", "seconds",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "mon", "tue", "tues", "wed", "thu", "thurs", "fri", "sat", "sun",
+        "january", "february", "march", "april", "may", "june", "july", "august",
+        "september", "october", "november", "december", "jan", "feb", "mar", "apr",
+        "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "it", "me", "us", "them",
+        "home", "office", "work", "shop", "store", "errands", "phone", "call"
     )
 
     fun parse(
@@ -186,22 +213,48 @@ object SmartAddParser {
         var inferredDurationMinutes: Int? = null
         var inferredRecurrence: String? = null
         var suppressReminder = false
+        var hasLeadingReminderIntent = false
+        var leadingReminderKind = "n"
+        var hasImmediateRelativeOffset = false
+        var exactOffsetMillis: Long? = null
         val inferredReminders = mutableListOf<String>()
 
-        // 2. Reminder intents
+        // 1b. Leading reminder command prefix: "remind me to ", "alarm me to ", "notify me to ", "remember to "
+        Regex("^\\s*(?:please\\s+)?(alarm|remind|notify|remember)(?:\\s+me)?\\s+to\\b", RegexOption.IGNORE_CASE)
+            .find(input)?.let { m ->
+                if (isUnprotected(m.range)) {
+                    val verb = m.groupValues[1].lowercase()
+                    leadingReminderKind = if (verb.startsWith("alarm")) "a" else "n"
+                    if (addSpan(m.range.first, m.range.last + 1, SpanCategory.REMINDER, "rem:0m/$leadingReminderKind")) {
+                        hasLeadingReminderIntent = true
+                    }
+                }
+            }
+
+        // 2. Explicit Reminder intents
         Regex("\\b(?:don't|do not|no)\\s+remind(?:\\s+me)?\\b", RegexOption.IGNORE_CASE).find(input)?.let { m ->
             if (isUnprotected(m.range) && addSpan(m.range.first, m.range.last + 1, SpanCategory.REMINDER, "rem:none")) {
                 suppressReminder = true
             }
         }
 
-        Regex("\\b(alarm|remind(?:\\s+me)?|notify(?:\\s+me)?|notification)\\s+(\\d+)\\s*(min(?:ute)?s?|m|hr?s?|hours?|days?|d)\\s+before\\b", RegexOption.IGNORE_CASE)
+        Regex("\\b(alarm|remind(?:\\s+me)?|notify(?:\\s+me)?|notification)\\s+(\\d+(?:\\.\\d+)?)\\s*(min(?:ute)?s?|m|hr?s?|hours?|h|days?|d|weeks?|w)\\s+before\\b", RegexOption.IGNORE_CASE)
             .findAll(input).forEach { m ->
                 if (isUnprotected(m.range)) {
                     val kind = if (m.groupValues[1].lowercase().startsWith("alarm")) "a" else "n"
-                    val num = m.groupValues[2].toInt()
+                    val amount = m.groupValues[2].toDoubleOrNull() ?: 15.0
                     val unitChar = m.groupValues[3].lowercase()[0]
-                    val spec = "-${num}${unitChar}/$kind"
+                    val spec = if (amount % 1.0 == 0.0) {
+                        "-${amount.toInt()}${unitChar}/$kind"
+                    } else {
+                        val mins = when (unitChar) {
+                            'h' -> (amount * 60).roundToLong()
+                            'd' -> (amount * 1440).roundToLong()
+                            'w' -> (amount * 10080).roundToLong()
+                            else -> amount.roundToLong()
+                        }
+                        "-${mins}m/$kind"
+                    }
                     if (addSpan(m.range.first, m.range.last + 1, SpanCategory.REMINDER, "rem:$spec")) {
                         inferredReminders.add(spec)
                     }
@@ -269,7 +322,7 @@ object SmartAddParser {
                 }
             }
 
-        // 4. Ranges & durations
+        // 4. Ranges & durations ("2 to 3pm", "for 45 min", "for 1.5 hrs")
         Regex("\\b(?:from\\s+)?(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?\\s*(?:to|-)\\s*(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)\\b", RegexOption.IGNORE_CASE)
             .find(input)?.let { m ->
                 if (isUnprotected(m.range)) {
@@ -288,19 +341,97 @@ object SmartAddParser {
                 }
             }
 
-        Regex("\\bfor\\s+(\\d+)\\s*(min(?:ute)?s?|m|hr?s?|hours?)\\b", RegexOption.IGNORE_CASE)
+        Regex("\\bfor\\s+(\\d+(?:\\.\\d+)?)\\s*(min(?:ute)?s?|m|hr?s?|hours?|h)\\b", RegexOption.IGNORE_CASE)
             .find(input)?.let { m ->
                 if (isUnprotected(m.range)) {
-                    val qty = m.groupValues[1].toInt()
+                    val qty = m.groupValues[1].toDoubleOrNull() ?: 1.0
                     val isHours = m.groupValues[2].lowercase().startsWith("h")
-                    val mins = if (isHours) qty * 60 else qty
+                    val mins = if (isHours) (qty * 60.0).roundToLong().toInt() else qty.roundToLong().toInt()
                     if (addSpan(m.range.first, m.range.last + 1, SpanCategory.DURATION_RANGE, "dur:${mins}m")) {
                         inferredDurationMinutes = mins
                     }
                 }
             }
 
-        // 5. Explicit clock times
+        // 5. Granular Relative Offsets ("in 1 min", "in 2 hr", "in 1.5 hrs", "in 1 month", "in 1h 30m", "in 3 days")
+        // Compound offset first: e.g. "in 1 hr 30 min" or "in 1h 15m"
+        Regex("\\b(?:in|after)\\s+(\\d+)\\s*(?:hr?s?|hours?|h)\\s*(?:and\\s*)?(\\d+)\\s*(?:min(?:ute)?s?|m)\\b", RegexOption.IGNORE_CASE)
+            .find(input)?.let { m ->
+                if (isUnprotected(m.range)) {
+                    val hrs = m.groupValues[1].toLongOrNull() ?: 0L
+                    val mins = m.groupValues[2].toLongOrNull() ?: 0L
+                    val targetDt = now.plusHours(hrs).plusMinutes(mins)
+                    val tStr = "%02d:%02d".format(targetDt.hour, targetDt.minute)
+                    if (addSpan(m.range.first, m.range.last + 1, SpanCategory.DATE_TIME, "due:${targetDt.toLocalDate()} duetime:$tStr")) {
+                        inferredDueDate = targetDt.toLocalDate()
+                        inferredDueTime = LocalTime.of(targetDt.hour, targetDt.minute)
+                        hasImmediateRelativeOffset = true
+                        exactOffsetMillis = (hrs * 3600L + mins * 60L) * 1000L
+                    }
+                }
+            }
+
+        // Single decimal or integer granular offset: "in 1 min", "in 1.5 hrs", "in 2 hr", "in 1 month", "in 3 days", "in 2 weeks", "in 1 year"
+        Regex("\\b(?:in|after)\\s+(a|an|\\d+(?:\\.\\d+)?)\\s*(sec(?:ond)?s?|s|min(?:ute)?s?|m|hr?s?|hours?|h|days?|d|weeks?|wks?|w|months?|mos?|mo|years?|yrs?|y)\\b", RegexOption.IGNORE_CASE)
+            .find(input)?.let { m ->
+                if (inferredDueDate == null && isUnprotected(m.range)) {
+                    val rawAmt = m.groupValues[1].lowercase()
+                    val amount = if (rawAmt == "a" || rawAmt == "an") 1.0 else (rawAmt.toDoubleOrNull() ?: 1.0)
+                    val unit = m.groupValues[2].lowercase()
+                    val isSubDayOrExact = unit.startsWith("s") || unit in setOf("m", "min", "mins", "minute", "minutes") ||
+                        unit.startsWith("h") || (amount % 1.0 != 0.0)
+
+                    val targetDt: LocalDateTime = when {
+                        unit.startsWith("s") -> now.plusSeconds(amount.roundToLong().coerceAtLeast(60L))
+                        unit in setOf("m", "min", "mins", "minute", "minutes") -> now.plusMinutes(amount.roundToLong())
+                        unit.startsWith("h") -> now.plusMinutes((amount * 60.0).roundToLong())
+                        unit.startsWith("d") -> {
+                            if (amount % 1.0 == 0.0) now.plusDays(amount.toLong())
+                            else now.plusMinutes((amount * 1440.0).roundToLong())
+                        }
+                        unit.startsWith("w") -> {
+                            if (amount % 1.0 == 0.0) now.plusWeeks(amount.toLong())
+                            else now.plusMinutes((amount * 10080.0).roundToLong())
+                        }
+                        unit.startsWith("mo") || unit.startsWith("month") -> {
+                            val wholeMonths = amount.toLong()
+                            val extraDays = ((amount - wholeMonths) * 30.0).roundToLong()
+                            now.plusMonths(wholeMonths).plusDays(extraDays)
+                        }
+                        unit.startsWith("y") -> {
+                            val wholeYears = amount.toLong()
+                            val extraDays = ((amount - wholeYears) * 365.0).roundToLong()
+                            now.plusYears(wholeYears).plusDays(extraDays)
+                        }
+                        else -> now.plusMinutes(amount.roundToLong())
+                    }
+
+                    val dLocal = targetDt.toLocalDate()
+                    val tLocal = LocalTime.of(targetDt.hour, targetDt.minute)
+                    val keepTime = isSubDayOrExact || hasLeadingReminderIntent || unit.startsWith("mo") || unit.startsWith("y")
+                    // Preserve compatibility with date-only "in 3 days" when no leading "remind me" was used,
+                    // while setting exact time for "in 1 min", "in 2 hr", "in 1.5 hrs", "in 1 month", or "remind me ... in X"
+                    val assignTime = isSubDayOrExact || hasLeadingReminderIntent || unit.startsWith("mo") || unit.startsWith("y")
+                    val resolvedLabel = if (assignTime) "due:$dLocal duetime:${"%02d:%02d".format(tLocal.hour, tLocal.minute)}" else "due:$dLocal"
+
+                    if (addSpan(m.range.first, m.range.last + 1, SpanCategory.DATE_TIME, resolvedLabel)) {
+                        inferredDueDate = dLocal
+                        if (assignTime) {
+                            inferredDueTime = tLocal
+                            hasImmediateRelativeOffset = true
+                            exactOffsetMillis = when {
+                                unit.startsWith("s") -> (amount * 1000.0).roundToLong().coerceAtLeast(5000L)
+                                unit in setOf("m", "min", "mins", "minute", "minutes") -> (amount * 60_000.0).roundToLong()
+                                unit.startsWith("h") -> (amount * 3_600_000.0).roundToLong()
+                                unit.startsWith("d") -> (amount * 86_400_000.0).roundToLong()
+                                else -> null
+                            }
+                        }
+                    }
+                }
+            }
+
+        // 6. Explicit clock times
         Regex("\\b(?:at\\s+)?(noon|midnight)\\b", RegexOption.IGNORE_CASE).find(input)?.let { m ->
             if (isUnprotected(m.range)) {
                 val tm = if (m.groupValues[1].lowercase() == "noon") LocalTime.of(12, 0) else LocalTime.of(0, 0)
@@ -340,7 +471,7 @@ object SmartAddParser {
             }
         }
 
-        // 6. Relative & calendar dates
+        // 7. Calendar & relative dates ("today", "tomorrow", "end of month", "the 15th", "Nov 15", "Tuesday")
         Regex("\\b(today|tomorrow)(?:\\s+(morning|afternoon|evening|night))?\\b", RegexOption.IGNORE_CASE)
             .find(input)?.let { m ->
                 if (isUnprotected(m.range)) {
@@ -356,35 +487,6 @@ object SmartAddParser {
                     if (addSpan(m.range.first, m.range.last + 1, SpanCategory.DATE_TIME, "due:$baseD")) {
                         inferredDueDate = baseD
                         if (inferredDueTime == null && periodTime != null) inferredDueTime = periodTime
-                    }
-                }
-            }
-
-        Regex("\\bin\\s+(\\d+)\\s+(day|week|month|hour|minute|min)s?\\b", RegexOption.IGNORE_CASE)
-            .find(input)?.let { m ->
-                if (isUnprotected(m.range)) {
-                    val qty = m.groupValues[1].toLong()
-                    val unit = m.groupValues[2].lowercase()
-                    when {
-                        unit.startsWith("d") -> {
-                            val d = today.plusDays(qty)
-                            if (addSpan(m.range.first, m.range.last + 1, SpanCategory.DATE_TIME, "due:$d")) inferredDueDate = d
-                        }
-                        unit.startsWith("w") -> {
-                            val d = today.plusWeeks(qty)
-                            if (addSpan(m.range.first, m.range.last + 1, SpanCategory.DATE_TIME, "due:$d")) inferredDueDate = d
-                        }
-                        unit.startsWith("m") && unit == "month" -> {
-                            val d = today.plusMonths(qty)
-                            if (addSpan(m.range.first, m.range.last + 1, SpanCategory.DATE_TIME, "due:$d")) inferredDueDate = d
-                        }
-                        unit.startsWith("h") -> {
-                            val dt = now.plusHours(qty)
-                            if (addSpan(m.range.first, m.range.last + 1, SpanCategory.DATE_TIME, "due:${dt.toLocalDate()} duetime:${dt.toLocalTime().withSecond(0).withNano(0)}")) {
-                                inferredDueDate = dt.toLocalDate()
-                                inferredDueTime = dt.toLocalTime().withSecond(0).withNano(0)
-                            }
-                        }
                     }
                 }
             }
@@ -461,7 +563,7 @@ object SmartAddParser {
             inferredDueDate = if (targetTime.isAfter(now.toLocalTime())) today else today.plusDays(1)
         }
 
-        // 7. Priority keywords
+        // 8. Priority keywords
         var inferredPriority: Char? = null
         Regex("(?<=^|\\s)(!!|!|\\burgent\\b|\\basap\\b|\\bimportant\\b)(?=\\s|$)", RegexOption.IGNORE_CASE)
             .find(input)?.let { m ->
@@ -474,7 +576,10 @@ object SmartAddParser {
                 }
             }
 
-        // 8. Context phrases from rules
+        // 9. Context inference:
+        //    (a) User-configured phrase rules in `tick.rules.txt`
+        //    (b) Grammatical location/medium prepositions: "at <place>", "in the <place>", "on <medium>"
+        //        e.g. "at factory" -> @factory, "at clinic" -> @clinic, "in warehouse" -> @warehouse
         val inferredContexts = mutableListOf<String>()
         for ((phrase, ctxName) in rules.phraseToContext.entries.sortedByDescending { it.key.length }) {
             val rx = Regex("\\b${Regex.escape(phrase)}\\b", RegexOption.IGNORE_CASE)
@@ -490,7 +595,28 @@ object SmartAddParser {
             }
         }
 
-        // 9. Project keyword rules
+        // Grammatical location/context extraction for any novel place/context ("at factory" -> @factory)
+        Regex("\\b(?:at|in|on|from|via)\\s+(?:the\\s+|a\\s+|an\\s+|my\\s+|our\\s+)?([A-Za-z][A-Za-z0-9_-]{2,24})\\b", RegexOption.IGNORE_CASE)
+            .findAll(input).forEach { m ->
+                if (isUnprotected(m.range)) {
+                    val candidateCtx = m.groupValues[1].lowercase()
+                    val prep = m.value.substringBefore(" ").lowercase()
+                    // Only treat "at <noun>" or "via <noun>" or "in the <noun>" as a context if not a time/stopword
+                    val hasArticle = Regex("\\b(?:at|in|on|from|via)\\s+(?:the|a|an|my|our)\\s+", RegexOption.IGNORE_CASE).containsMatchIn(m.value)
+                    if (candidateCtx !in NON_ENTITY_WORDS && (prep == "at" || prep == "via" || hasArticle)) {
+                        if (addSpan(m.range.first, m.range.last + 1, SpanCategory.CONTEXT, "@$candidateCtx", stripFromTitle = true)) {
+                            if (candidateCtx !in explicitContexts && candidateCtx !in inferredContexts) {
+                                inferredContexts.add(candidateCtx)
+                            }
+                        }
+                    }
+                }
+            }
+
+        // 10. Project inference:
+        //     (a) User-configured keyword rules in `tick.rules.txt`
+        //     (b) Grammatical verb-object / topic inference for any novel project noun
+        //         e.g. "check chocotat" -> +chocotat, "with <noun>" -> +<noun>, "for <noun>" -> +<noun>
         val inferredProjects = mutableListOf<String>()
         for ((keyword, projName) in rules.keywordToProject) {
             val rx = Regex("\\b${Regex.escape(keyword)}\\b", RegexOption.IGNORE_CASE)
@@ -504,13 +630,32 @@ object SmartAddParser {
             }
         }
 
+        if (explicitProjects.isEmpty() && inferredProjects.isEmpty()) {
+            // Grammatical direct object after action verb: e.g. "check chocotat", "inspect boiler", "deploy backend"
+            val verbObjRegex = Regex(
+                "\\b(?:check|review|fix|build|update|call|email|pay|buy|clean|finish|prepare|send|test|visit|inspect|audit|debug|deploy|write|plan|schedule|order|pickup|pick\\s+up|meet|talk\\s+to|work\\s+on|follow\\s+up\\s+on)\\s+(?:the\\s+|a\\s+|an\\s+|my\\s+|our\\s+|on\\s+|up\\s+)?([A-Za-z][A-Za-z0-9_-]{2,24})\\b",
+                RegexOption.IGNORE_CASE
+            )
+            verbObjRegex.findAll(input).forEach { m ->
+                val objWord = m.groupValues[1].lowercase()
+                val objRange = m.groups[1]!!.range
+                if (inferredProjects.isEmpty() && objWord !in NON_ENTITY_WORDS && objWord !in inferredContexts && isUnprotected(objRange)) {
+                    if (addSpan(objRange.first, objRange.last + 1, SpanCategory.PROJECT, "+$objWord", stripFromTitle = false)) {
+                        inferredProjects.add(objWord)
+                    }
+                }
+            }
+        }
+
+        // Build stripped title
         val rawTitleChars = StringBuilder()
         for (i in input.indices) {
             if (!consumedMask[i]) rawTitleChars.append(input[i])
         }
         val strippedTitle = rawTitleChars.toString()
             .replace(Regex("\\s+"), " ")
-            .replace(Regex("\\s+(?:at|on|by|in)\\s*$", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("^\\s*(?:to|and)\\s+", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s+(?:at|on|by|in|for|to)\\s*$", RegexOption.IGNORE_CASE), "")
             .trim()
             .ifEmpty { input.trim() }
 
@@ -524,6 +669,7 @@ object SmartAddParser {
         val finalReminders = when {
             suppressReminder -> emptyList()
             explicitReminders.isNotEmpty() || inferredReminders.isNotEmpty() -> (explicitReminders + inferredReminders).distinct()
+            hasImmediateRelativeOffset || hasLeadingReminderIntent -> listOf("0m/$leadingReminderKind")
             finalDueDate != null && finalDueTime != null -> listOf(rules.timedReminderDefault)
             finalDueDate != null -> listOf(rules.dateOnlyReminderDefault)
             else -> emptyList()
@@ -551,6 +697,7 @@ object SmartAddParser {
             creationDate = today,
             dueDate = finalDueDate,
             dueTime = finalDueTime,
+            exactOffsetMillis = exactOffsetMillis,
             thresholdDate = explicitThreshold,
             durationMinutes = inferredDurationMinutes,
             recurrence = finalRecurrence,

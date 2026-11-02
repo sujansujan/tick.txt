@@ -4,6 +4,7 @@
     <!-- Zero network permissions: tick.txt is strictly offline-only -->
 
     <!-- Exact alarm & reminder reliability permissions -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
@@ -17,7 +18,7 @@
 
     <application
         android:name=".TickApplication"
-        android:allowBackup="false"
+        android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="tick.txt"

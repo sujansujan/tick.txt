@@ -1,6 +1,5 @@
 package com.ticktxt.app
 
-import com.ticktxt.app.core.nlp.RulesEngine
 import com.ticktxt.app.core.nlp.SmartAddParser
 import com.ticktxt.app.core.nlp.TickRulesConfig
 import org.junit.jupiter.api.Assertions.*
@@ -32,6 +31,47 @@ class SmartAddParserTest {
     }
 
     @Test
+    fun `infers novel project and context from remind me to check chocotat at factory in 1 min`() {
+        val res = SmartAddParser.parse(
+            "remind me to check chocotat at factory in 1 min",
+            anchorNow,
+            rules
+        )
+        assertEquals("check chocotat", res.strippedTitle)
+        assertEquals(listOf("chocotat"), res.projects)
+        assertEquals(listOf("factory"), res.contexts)
+        assertEquals(LocalDate.of(2026, 11, 1), res.dueDate)
+        assertEquals(LocalTime.of(19, 5), res.dueTime)
+        assertEquals(listOf("0m/n"), res.reminders)
+        assertEquals(
+            "2026-11-01 check chocotat +chocotat @factory due:2026-11-01 duetime:19:05 rem:0m/n",
+            res.formattedTodoLine
+        )
+    }
+
+    @Test
+    fun `parses granular relative offsets including decimals and months`() {
+        val r1 = SmartAddParser.parse("check oven at kitchen in 1.5 hrs", anchorNow, rules)
+        assertEquals("check oven", r1.strippedTitle)
+        assertEquals(listOf("oven"), r1.projects)
+        assertEquals(listOf("kitchen"), r1.contexts)
+        assertEquals(LocalDate.of(2026, 11, 1), r1.dueDate)
+        assertEquals(LocalTime.of(20, 34), r1.dueTime)
+        assertEquals(listOf("0m/n"), r1.reminders)
+
+        val r2 = SmartAddParser.parse("inspect generator at warehouse in 2 hr", anchorNow, rules)
+        assertEquals(LocalDate.of(2026, 11, 1), r2.dueDate)
+        assertEquals(LocalTime.of(21, 4), r2.dueTime)
+        assertEquals(listOf("generator"), r2.projects)
+        assertEquals(listOf("warehouse"), r2.contexts)
+
+        val r3 = SmartAddParser.parse("renew license at portal in 1 month", anchorNow, rules)
+        assertEquals(LocalDate.of(2026, 12, 1), r3.dueDate)
+        assertEquals(LocalTime.of(19, 4), r3.dueTime)
+        assertEquals(listOf("portal"), r3.contexts)
+    }
+
+    @Test
     fun `preserves title words in meeting at Tuesday's cafe and ambiguous may or march`() {
         val r1 = SmartAddParser.parse("meeting at Tuesday's cafe tomorrow at 10am", anchorNow, rules)
         assertEquals("meeting at Tuesday's cafe", r1.strippedTitle)
@@ -59,13 +99,11 @@ class SmartAddParserTest {
 
     @Test
     fun `handles ranges, recurrence, alarm intents, and past-time rollover`() {
-        // Past time today (2pm when now is 19:04) -> rolls over to tomorrow (2026-11-02)
         val pastTime = SmartAddParser.parse("send client invoice at 2pm", anchorNow, rules)
         assertEquals(LocalDate.of(2026, 11, 2), pastTime.dueDate)
         assertEquals(LocalTime.of(14, 0), pastTime.dueTime)
         assertEquals(listOf("work"), pastTime.projects)
 
-        // Alarm intent + recurrence
         val alarmRec = SmartAddParser.parse("take vitamins every day alarm at 7am", anchorNow, rules)
         assertEquals("1d", alarmRec.recurrence)
         assertEquals(listOf("07:00/a"), alarmRec.reminders)

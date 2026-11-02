@@ -17,10 +17,9 @@ data class PermissionDiagnostics(
 )
 
 /**
- * Wraps Android's `AlarmManager` with exact Doze-aware scheduling:
- * - For `ReminderType.ALARM`: uses `AlarmManager.setAlarmClock(...)` which wakes the device
- *   out of Doze, shows in the system status bar, and launches `FullScreenAlarmActivity` over lockscreen.
- * - For `ReminderType.NOTIFICATION` and `SILENT`: uses `AlarmManager.setExactAndAllowWhileIdle(...)`.
+ * Schedules exact Android alarms that fire reliably even in Doze mode.
+ * Also supports direct millisecond delay scheduling (`scheduleExactAfterMillis`)
+ * so "in 1m", "in 1 hr", "in 1.5 hrs" fire at the exact target second.
  */
 class ReminderScheduler(private val context: Context) {
 
@@ -29,7 +28,7 @@ class ReminderScheduler(private val context: Context) {
 
     fun canScheduleExact(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            alarmManager.canScheduleExactAlarms()
+            runCatching { alarmManager.canScheduleExactAlarms() }.getOrDefault(true)
         } else {
             true
         }
@@ -39,17 +38,35 @@ class ReminderScheduler(private val context: Context) {
         return powerManager.isIgnoringBatteryOptimizations(context.packageName)
     }
 
-    fun scheduleInstance(instance: ScheduledReminderInstance) {
-        val triggerEpochMs = instance.triggerAt.toInstant().toEpochMilli()
+    fun scheduleInstance(instance: ScheduledReminderInstance, overrideTriggerEpochMs: Long? = null) {
+        val triggerEpochMs = overrideTriggerEpochMs ?: instance.triggerAt.toInstant().toEpochMilli()
+        scheduleRaw(
+            reminderId = instance.reminderId,
+            taskStableId = instance.taskStableId,
+            rawSpec = instance.spec.rawSpec,
+            taskDescription = instance.taskDescription,
+            typeCode = instance.spec.type.code,
+            triggerEpochMs = triggerEpochMs
+        )
+    }
+
+    fun scheduleRaw(
+        reminderId: String,
+        taskStableId: String,
+        rawSpec: String,
+        taskDescription: String,
+        typeCode: String,
+        triggerEpochMs: Long
+    ) {
         val intent = Intent(context, AlarmBroadcastReceiver::class.java).apply {
             action = ACTION_FIRE_REMINDER
-            putExtra(EXTRA_REMINDER_ID, instance.reminderId)
-            putExtra(EXTRA_TASK_ID, instance.taskStableId)
-            putExtra(EXTRA_RAW_SPEC, instance.spec.rawSpec)
-            putExtra(EXTRA_TASK_TITLE, instance.taskDescription)
-            putExtra(EXTRA_REMINDER_TYPE, instance.spec.type.code)
+            putExtra(EXTRA_REMINDER_ID, reminderId)
+            putExtra(EXTRA_TASK_ID, taskStableId)
+            putExtra(EXTRA_RAW_SPEC, rawSpec)
+            putExtra(EXTRA_TASK_TITLE, taskDescription)
+            putExtra(EXTRA_REMINDER_TYPE, typeCode)
         }
-        val requestCode = instance.reminderId.hashCode()
+        val requestCode = reminderId.hashCode()
         val pendingIntent = PendingIntent.getBroadcast(
             context,
             requestCode,
@@ -57,29 +74,46 @@ class ReminderScheduler(private val context: Context) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        if (instance.spec.type == ReminderType.ALARM && canScheduleExact()) {
-            val showIntent = PendingIntent.getActivity(
-                context,
-                requestCode,
-                Intent(context, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val clockInfo = AlarmManager.AlarmClockInfo(triggerEpochMs, showIntent)
-            alarmManager.setAlarmClock(clockInfo, pendingIntent)
-        } else if (canScheduleExact()) {
-            alarmManager.setExactAndAllowWhileIdle(
+        val safeTriggerMs = triggerEpochMs.coerceAtLeast(System.currentTimeMillis() + 1000L)
+
+        try {
+            if (canScheduleExact()) {
+                val showIntent = PendingIntent.getActivity(
+                    context,
+                    requestCode,
+                    Intent(context, MainActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                // setAlarmClock is never throttled by Doze and guarantees exact delivery
+                val clockInfo = AlarmManager.AlarmClockInfo(safeTriggerMs, showIntent)
+                alarmManager.setAlarmClock(clockInfo, pendingIntent)
+            } else {
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    safeTriggerMs,
+                    pendingIntent
+                )
+            }
+        } catch (_: SecurityException) {
+            alarmManager.setWindow(
                 AlarmManager.RTC_WAKEUP,
-                triggerEpochMs,
-                pendingIntent
-            )
-        } else {
-            // Graceful fallback while user hasn't granted SCHEDULE_EXACT_ALARM yet
-            alarmManager.setAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                triggerEpochMs,
+                safeTriggerMs,
+                5_000L,
                 pendingIntent
             )
         }
+    }
+
+    fun fireImmediateNotification(taskTitle: String, rawSpec: String = "0m/n", typeCode: String = "n") {
+        val intent = Intent(context, AlarmBroadcastReceiver::class.java).apply {
+            action = ACTION_FIRE_REMINDER
+            putExtra(EXTRA_REMINDER_ID, "immediate_${System.currentTimeMillis()}")
+            putExtra(EXTRA_TASK_ID, "immediate")
+            putExtra(EXTRA_RAW_SPEC, rawSpec)
+            putExtra(EXTRA_TASK_TITLE, taskTitle)
+            putExtra(EXTRA_REMINDER_TYPE, typeCode)
+        }
+        context.sendBroadcast(intent)
     }
 
     fun cancelInstance(reminderId: String) {
@@ -103,6 +137,7 @@ class ReminderScheduler(private val context: Context) {
         const val ACTION_SNOOZE_REMINDER = "com.ticktxt.app.ACTION_SNOOZE_REMINDER"
         const val ACTION_DISMISS_REMINDER = "com.ticktxt.app.ACTION_DISMISS_REMINDER"
         const val ACTION_MARK_DONE = "com.ticktxt.app.ACTION_MARK_DONE"
+        const val ACTION_TASKS_UPDATED = "com.ticktxt.app.ACTION_TASKS_UPDATED"
 
         const val EXTRA_REMINDER_ID = "extra_reminder_id"
         const val EXTRA_TASK_ID = "extra_task_id"

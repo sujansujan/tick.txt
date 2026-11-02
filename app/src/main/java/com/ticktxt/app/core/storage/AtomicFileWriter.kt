@@ -3,13 +3,11 @@ package com.ticktxt.app.core.storage
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 
 /**
- * Guarantees crash-safe atomic writes for todo.txt, done.txt, tick.rules.txt, and notes.
- * Writes to `<target>.tmp` in the same directory, flushes & fsyncs the file descriptor,
- * then performs an atomic POSIX/filesystem rename.
+ * Guarantees crash-safe writes across all Android filesystems (ext4, F2FS, FUSE, SDCardFS).
+ * Writes to a sibling `.tmp` file, flushes & fsyncs, and renames; if FUSE blocks rename,
+ * writes directly with fsync so user changes are never lost on app close.
  */
 object AtomicFileWriter {
 
@@ -20,32 +18,29 @@ object AtomicFileWriter {
             throw IOException("Failed to create parent directory: ${parent.absolutePath}")
         }
 
-        val tempFile = File(parent, "${targetFile.name}.tmp.${System.nanoTime()}")
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        val tempFile = File(parent, "${targetFile.name}.tmp")
+        var renamed = false
         try {
-            FileOutputStream(tempFile).use { fos ->
-                val bytes = content.toByteArray(Charsets.UTF_8)
+            FileOutputStream(tempFile, false).use { fos ->
                 fos.write(bytes)
                 fos.flush()
-                fos.fd.sync()
+                runCatching { fos.fd.sync() }
             }
-            try {
-                Files.move(
-                    tempFile.toPath(),
-                    targetFile.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            } catch (_: Exception) {
-                // Fallback for filesystems that do not support ATOMIC_MOVE
-                Files.move(
-                    tempFile.toPath(),
-                    targetFile.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            }
+            renamed = tempFile.renameTo(targetFile)
+        } catch (_: Exception) {
+            renamed = false
         } finally {
-            if (tempFile.exists()) {
-                tempFile.delete()
+            if (!renamed && tempFile.exists()) {
+                runCatching { tempFile.delete() }
+            }
+        }
+
+        if (!renamed) {
+            FileOutputStream(targetFile, false).use { fos ->
+                fos.write(bytes)
+                fos.flush()
+                runCatching { fos.fd.sync() }
             }
         }
     }

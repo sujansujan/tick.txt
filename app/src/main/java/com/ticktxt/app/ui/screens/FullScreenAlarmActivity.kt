@@ -43,8 +43,8 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
 /**
- * Native Compose Full-Width ASCII Box Components (`+---...---+` and `| ... |`).
- * All options, toggles, and actions live INSIDE the box with ASCII icons (`[*]`, `[!]`, `[~]`, `[#]`, `[/]`).
+ * Compact Native Compose Full-Width ASCII Box Components (`+--[Title]---+`, `+---...---+`, and `| ... |`).
+ * Designed for tight vertical density so many tasks fit on screen without scrolling.
  */
 @Composable
 fun AsciiHorizontalBorder(
@@ -59,7 +59,8 @@ fun AsciiHorizontalBorder(
         Text(
             text = corner,
             color = color,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
@@ -67,7 +68,8 @@ fun AsciiHorizontalBorder(
         Text(
             text = fillChar.toString().repeat(240),
             color = color,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
             fontFamily = FontFamily.Monospace,
             maxLines = 1,
             softWrap = false,
@@ -77,11 +79,112 @@ fun AsciiHorizontalBorder(
         Text(
             text = corner,
             color = color,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
         )
+    }
+}
+
+/**
+ * Top border with embedded `[Date and Time]` or `[Title]` badge:
+ * `+--[2026-11-02 09:00]--------------------------------+`
+ */
+@Composable
+fun AsciiTitledTopBorder(
+    badgeText: String,
+    borderColor: Color = LocalTickPalette.current.fgMuted,
+    badgeColor: Color = LocalTickPalette.current.priorityB,
+    rightBadgeText: String? = null,
+    rightBadgeColor: Color = LocalTickPalette.current.fgMuted,
+    onRightBadgeClick: (() -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "+--[",
+            color = borderColor,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        Text(
+            text = badgeText,
+            color = badgeColor,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        Text(
+            text = "]",
+            color = borderColor,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        Text(
+            text = "-".repeat(240),
+            color = borderColor,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.weight(1f)
+        )
+        if (rightBadgeText != null) {
+            Text(
+                text = "[",
+                color = borderColor,
+                fontSize = 12.sp,
+                lineHeight = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                softWrap = false,
+                maxLines = 1
+            )
+            Text(
+                text = rightBadgeText,
+                color = rightBadgeColor,
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+                lineHeight = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                softWrap = false,
+                maxLines = 1,
+                modifier = if (onRightBadgeClick != null) Modifier.clickable { onRightBadgeClick() } else Modifier
+            )
+            Text(
+                text = "]--+",
+                color = borderColor,
+                fontSize = 12.sp,
+                lineHeight = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                softWrap = false,
+                maxLines = 1
+            )
+        } else {
+            Text(
+                text = "+",
+                color = borderColor,
+                fontSize = 12.sp,
+                lineHeight = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                softWrap = false,
+                maxLines = 1
+            )
+        }
     }
 }
 
@@ -102,13 +205,14 @@ fun AsciiBoxLeftRightRow(
         modifier = Modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
-            .padding(vertical = if (onClick != null) 3.dp else 1.dp),
+            .padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = "| ",
             color = borderColor,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
@@ -117,6 +221,7 @@ fun AsciiBoxLeftRightRow(
             text = left,
             color = leftColor,
             fontSize = fontSizeSp.sp,
+            lineHeight = (fontSizeSp + 2).sp,
             fontWeight = if (boldLeft) FontWeight.Bold else FontWeight.Normal,
             fontFamily = LocalTickFontFamily.current,
             maxLines = 1,
@@ -125,11 +230,12 @@ fun AsciiBoxLeftRightRow(
             modifier = Modifier.weight(1f)
         )
         if (right.isNotEmpty()) {
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = right,
                 color = rightColor,
                 fontSize = (fontSizeSp - 1).coerceAtLeast(11).sp,
+                lineHeight = (fontSizeSp + 1).sp,
                 fontWeight = if (boldRight) FontWeight.Bold else FontWeight.Normal,
                 textDecoration = if (underlineRight) TextDecoration.Underline else TextDecoration.None,
                 fontFamily = LocalTickFontFamily.current,
@@ -140,7 +246,8 @@ fun AsciiBoxLeftRightRow(
         Text(
             text = " |",
             color = borderColor,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
@@ -153,7 +260,7 @@ fun AsciiBoxBodyRow(
     text: String,
     textColor: Color = LocalTickPalette.current.fg,
     borderColor: Color = LocalTickPalette.current.fgMuted,
-    fontSizeSp: Int = 15,
+    fontSizeSp: Int = 14,
     bold: Boolean = false,
     strikethrough: Boolean = false,
     onClick: (() -> Unit)? = null
@@ -162,13 +269,14 @@ fun AsciiBoxBodyRow(
         modifier = Modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
-            .padding(vertical = 2.dp),
+            .padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = "| ",
             color = borderColor,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
@@ -177,6 +285,7 @@ fun AsciiBoxBodyRow(
             text = text,
             color = textColor,
             fontSize = fontSizeSp.sp,
+            lineHeight = (fontSizeSp + 2).sp,
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
             fontFamily = LocalTickFontFamily.current,
             textDecoration = if (strikethrough) TextDecoration.LineThrough else TextDecoration.None,
@@ -185,7 +294,8 @@ fun AsciiBoxBodyRow(
         Text(
             text = " |",
             color = borderColor,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
@@ -193,10 +303,6 @@ fun AsciiBoxBodyRow(
     }
 }
 
-/**
- * Renders an interactive option selector row strictly INSIDE the `+---...---+` box:
- * `| Label :  [*Opt1*]   Opt2   Opt3               |`
- */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun <T> AsciiBoxOptionRow(
@@ -206,7 +312,7 @@ fun <T> AsciiBoxOptionRow(
     onSelect: (T) -> Unit,
     activeColor: Color = LocalTickPalette.current.project,
     borderColor: Color = LocalTickPalette.current.fgMuted,
-    fontSizeSp: Int = 14
+    fontSizeSp: Int = 13
 ) {
     val palette = LocalTickPalette.current
     val appFont = LocalTickFontFamily.current
@@ -214,21 +320,22 @@ fun <T> AsciiBoxOptionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 2.dp),
+            .padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = "| ",
             color = borderColor,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
         )
         FlowRow(
             modifier = Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             if (label.isNotEmpty()) {
                 Text(
@@ -236,7 +343,7 @@ fun <T> AsciiBoxOptionRow(
                     color = palette.fgMuted,
                     fontSize = (fontSizeSp - 1).sp,
                     fontFamily = appFont,
-                    modifier = Modifier.padding(vertical = 4.dp)
+                    modifier = Modifier.padding(vertical = 2.dp)
                 )
             }
             options.forEach { (value, text) ->
@@ -250,14 +357,15 @@ fun <T> AsciiBoxOptionRow(
                     textDecoration = TextDecoration.Underline,
                     modifier = Modifier
                         .clickable { onSelect(value) }
-                        .padding(vertical = 4.dp, horizontal = 2.dp)
+                        .padding(vertical = 2.dp, horizontal = 2.dp)
                 )
             }
         }
         Text(
             text = " |",
             color = borderColor,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
@@ -265,27 +373,25 @@ fun <T> AsciiBoxOptionRow(
     }
 }
 
-/**
- * Renders an evenly distributed row of ASCII action triggers strictly INSIDE the `+---...---+` box:
- * `| [x] Done    [~] Snooze    [!] Alarm    [+] GCal |`
- */
 @Composable
 fun AsciiBoxActionRow(
     actions: List<Triple<String, Color, () -> Unit>>,
     borderColor: Color = LocalTickPalette.current.fgMuted,
-    fontSizeSp: Int = 13
+    fontSizeSp: Int = 13,
+    underline: Boolean = false
 ) {
     val appFont = LocalTickFontFamily.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 3.dp),
+            .padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = "| ",
             color = borderColor,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
@@ -301,18 +407,20 @@ fun AsciiBoxActionRow(
                     color = color,
                     fontWeight = FontWeight.Bold,
                     fontSize = fontSizeSp.sp,
+                    lineHeight = (fontSizeSp + 2).sp,
                     fontFamily = appFont,
-                    textDecoration = TextDecoration.Underline,
+                    textDecoration = if (underline) TextDecoration.Underline else TextDecoration.None,
                     modifier = Modifier
                         .clickable { onClick() }
-                        .padding(vertical = 4.dp, horizontal = 2.dp)
+                        .padding(vertical = 2.dp, horizontal = 2.dp)
                 )
             }
         }
         Text(
             text = " |",
             color = borderColor,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontFamily = FontFamily.Monospace,
             softWrap = false,
             maxLines = 1
@@ -525,7 +633,7 @@ class FullScreenAlarmActivity : ComponentActivity() {
 fun AsciiFullScreenAlarmSurface(
     taskTitle: String,
     rawSpec: String,
-    fontSizeSp: Int = 16,
+    fontSizeSp: Int = 15,
     initialAlarmMuted: Boolean = true,
     onToggleAlarmMute: (Boolean) -> Unit = {},
     onSnoozeWithPreset: (String) -> Unit,
@@ -568,37 +676,31 @@ fun AsciiFullScreenAlarmSurface(
             .statusBarsPadding()
             .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Centered ASCII Bell Art
         Text(
             text = PlainTextSportsAscii.ALARM_BELL_ART,
             color = if (isAlarmMuted) palette.priorityB else palette.priorityA,
-            fontSize = 13.sp,
-            lineHeight = 16.sp,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
             fontFamily = FontFamily.Monospace,
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
 
-        // Single Unified Full-Width ASCII Alarm & Snooze Box (Everything inside the box!)
         Column(modifier = Modifier.fillMaxWidth()) {
-            AsciiHorizontalBorder()
-            AsciiBoxLeftRightRow(
-                left = "[!] TASK ALARM ($clockFormatted)",
-                right = "rem:$rawSpec",
-                leftColor = palette.priorityA,
-                rightColor = palette.reminder,
-                fontSizeSp = fontSizeSp,
-                boldLeft = true
+            AsciiTitledTopBorder(
+                badgeText = "! ALARM $clockFormatted",
+                badgeColor = palette.priorityA,
+                rightBadgeText = "rem:$rawSpec",
+                rightBadgeColor = palette.reminder
             )
-            AsciiHorizontalBorder(corner = "|")
             AsciiBoxBodyRow(
-                text = ">> $taskTitle",
+                text = "[ ] $taskTitle",
                 textColor = palette.fg,
-                fontSizeSp = fontSizeSp + 2,
+                fontSizeSp = fontSizeSp + 1,
                 bold = true
             )
             AsciiHorizontalBorder(corner = "|")
@@ -621,9 +723,8 @@ fun AsciiFullScreenAlarmSurface(
                 activeColor = if (isAlarmMuted) palette.reminder else palette.priorityA,
                 fontSizeSp = fontSizeSp
             )
-            AsciiHorizontalBorder(corner = "|")
             AsciiBoxOptionRow(
-                label = "[~] Unit",
+                label = "[zZ] Unit",
                 options = SnoozeUnit.entries.map { it to it.asciiLabel.lowercase() },
                 selectedValue = selectedUnit,
                 onSelect = { u ->
@@ -660,22 +761,13 @@ fun AsciiFullScreenAlarmSurface(
                 fontSizeSp = fontSizeSp
             )
             AsciiHorizontalBorder(corner = "|")
-            AsciiBoxLeftRightRow(
-                left = "[~] Snooze +$snoozeAmount${selectedUnit.code} ($previewFormatted)",
-                right = "[Apply >]",
-                leftColor = palette.reminder,
-                rightColor = palette.reminder,
-                fontSizeSp = fontSizeSp,
-                boldLeft = true,
-                boldRight = true,
-                underlineRight = true,
-                onClick = { onSnoozeWithPreset(selectedUnit.toPresetSpec(snoozeAmount)) }
-            )
-            AsciiHorizontalBorder(corner = "|")
             AsciiBoxActionRow(
                 actions = listOf(
-                    Triple("[x] Complete Task", palette.reminder) { onMarkDone() },
-                    Triple("[X] Dismiss Alarm", palette.fgMuted) { onDismiss() }
+                    Triple("[x Done]", palette.reminder) { onMarkDone() },
+                    Triple("[zZ +$snoozeAmount${selectedUnit.code}]", palette.project) {
+                        onSnoozeWithPreset(selectedUnit.toPresetSpec(snoozeAmount))
+                    },
+                    Triple("[X Dismiss]", palette.fgMuted) { onDismiss() }
                 ),
                 fontSizeSp = fontSizeSp
             )

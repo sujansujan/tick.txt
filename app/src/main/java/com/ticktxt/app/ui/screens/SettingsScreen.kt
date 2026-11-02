@@ -14,9 +14,8 @@ import com.ticktxt.app.ui.theme.ThemeMode
 import java.io.File
 
 /**
- * Settings screen with 100% of options, toggles, and actions placed strictly INSIDE
- * the full-width `+---...---+` ASCII boxes using ASCII icons (`[*]`, `[!]`, `[#]`, `[/]`)
- * and zero redundant text outside the boxes.
+ * Compact Settings screen where each section header is embedded directly in the top border
+ * (`+--[* APPEARANCE]---+`) and all options live inside the box with tight vertical density.
  */
 @Composable
 fun SettingsScreen(
@@ -38,23 +37,16 @@ fun SettingsScreen(
             .fillMaxSize()
             .background(palette.bg)
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // =====================================================================
-        // 1. [*] APPEARANCE BOX (All options inside the box only)
-        // =====================================================================
+        // 1. +--[* APPEARANCE]-----------------------------------------+
         Column(modifier = Modifier.fillMaxWidth()) {
-            AsciiHorizontalBorder()
-            AsciiBoxLeftRightRow(
-                left = "[*] APPEARANCE",
-                right = "${settings.fontSizeSp}sp",
-                leftColor = palette.project,
-                rightColor = palette.fgMuted,
-                fontSizeSp = baseSp,
-                boldLeft = true
+            AsciiTitledTopBorder(
+                badgeText = "* APPEARANCE",
+                badgeColor = palette.project,
+                rightBadgeText = "${settings.fontSizeSp}sp"
             )
-            AsciiHorizontalBorder(corner = "|")
             AsciiBoxOptionRow(
                 label = "Mode",
                 options = listOf(
@@ -90,21 +82,15 @@ fun SettingsScreen(
             AsciiHorizontalBorder()
         }
 
-        // =====================================================================
-        // 2. [!] REMINDERS & ALARM BOX (All options inside the box only)
-        // =====================================================================
+        // 2. +--[! REMINDERS & ALARM]----------------------------------+
         Column(modifier = Modifier.fillMaxWidth()) {
             val normalizedRem = if (settings.defaultTimedReminder == "0m/n") "0m/a" else settings.defaultTimedReminder
-            AsciiHorizontalBorder()
-            AsciiBoxLeftRightRow(
-                left = "[!] REMINDERS & ALARM",
-                right = "rem:$normalizedRem",
-                leftColor = palette.priorityB,
-                rightColor = palette.reminder,
-                fontSizeSp = baseSp,
-                boldLeft = true
+            AsciiTitledTopBorder(
+                badgeText = "! REMINDERS & ALARM",
+                badgeColor = palette.priorityB,
+                rightBadgeText = "rem:$normalizedRem",
+                rightBadgeColor = palette.reminder
             )
-            AsciiHorizontalBorder(corner = "|")
             AsciiBoxOptionRow(
                 label = "Audio",
                 options = listOf(
@@ -131,82 +117,56 @@ fun SettingsScreen(
                 activeColor = palette.reminder,
                 fontSizeSp = baseSp
             )
-            AsciiHorizontalBorder(corner = "|")
             AsciiBoxLeftRightRow(
-                left = "[>] Test Full-Screen Alarm",
+                left = "[!] Test Full-Screen Alarm",
                 right = "[Run >]",
                 leftColor = palette.priorityA,
                 rightColor = palette.priorityA,
                 fontSizeSp = baseSp,
                 boldLeft = true,
                 boldRight = true,
-                underlineRight = true,
                 onClick = { onFireImmediateNotification() }
             )
             AsciiHorizontalBorder()
         }
 
-        // =====================================================================
-        // 3. [#] GOOGLE CALENDAR BOX (All options inside the box only)
-        // =====================================================================
+        // 3. +--[# GOOGLE CALENDAR]------------------------------------+
         Column(modifier = Modifier.fillMaxWidth()) {
-            AsciiHorizontalBorder()
-            AsciiBoxLeftRightRow(
-                left = "[#] GOOGLE CALENDAR",
-                right = if (settings.autoSyncGoogleCalendar) "AUTO: ON" else "AUTO: OFF",
-                leftColor = palette.contextTag,
-                rightColor = if (settings.autoSyncGoogleCalendar) palette.reminder else palette.fgMuted,
-                fontSizeSp = baseSp,
-                boldLeft = true,
-                boldRight = true
+            AsciiTitledTopBorder(
+                badgeText = "# GOOGLE CALENDAR",
+                badgeColor = palette.contextTag,
+                rightBadgeText = if (settings.autoSyncGoogleCalendar) "AUTO:ON" else "AUTO:OFF",
+                rightBadgeColor = if (settings.autoSyncGoogleCalendar) palette.reminder else palette.fgMuted
             )
-            AsciiHorizontalBorder(corner = "|")
-            AsciiBoxLeftRightRow(
-                left = if (settings.autoSyncGoogleCalendar) "[x] Auto-Sync Scheduled" else "[ ] Auto-Sync Scheduled",
-                right = "[Toggle]",
-                leftColor = palette.fg,
-                rightColor = palette.project,
-                fontSizeSp = baseSp,
-                boldRight = true,
-                underlineRight = true,
-                onClick = {
-                    onUpdateSettings(settings.copy(autoSyncGoogleCalendar = !settings.autoSyncGoogleCalendar))
-                }
-            )
-            AsciiBoxLeftRightRow(
-                left = "[~] Sync All Scheduled Tasks",
-                right = "[Sync >]",
-                leftColor = palette.contextTag,
-                rightColor = palette.contextTag,
-                fontSizeSp = baseSp,
-                boldLeft = true,
-                boldRight = true,
-                underlineRight = true,
-                onClick = { onSyncAllToGoogleCalendar() }
+            AsciiBoxActionRow(
+                actions = listOf(
+                    Triple(
+                        if (settings.autoSyncGoogleCalendar) "[x] Auto-Sync" else "[ ] Auto-Sync",
+                        if (settings.autoSyncGoogleCalendar) palette.reminder else palette.fgMuted
+                    ) {
+                        onUpdateSettings(settings.copy(autoSyncGoogleCalendar = !settings.autoSyncGoogleCalendar))
+                    },
+                    Triple("[#] Sync All Tasks >", palette.contextTag) {
+                        onSyncAllToGoogleCalendar()
+                    }
+                ),
+                fontSizeSp = baseSp
             )
             AsciiHorizontalBorder()
         }
 
-        // =====================================================================
-        // 4. [/] PLAIN TEXT STORAGE BOX (All options inside the box only)
-        // =====================================================================
+        // 4. +--[/ PLAIN TEXT STORAGE]---------------------------------+
         Column(modifier = Modifier.fillMaxWidth()) {
-            AsciiHorizontalBorder()
-            AsciiBoxLeftRightRow(
-                left = "[/] PLAIN TEXT STORAGE",
-                right = "todo.txt",
-                leftColor = palette.project,
-                rightColor = palette.fgMuted,
-                fontSizeSp = baseSp,
-                boldLeft = true
+            AsciiTitledTopBorder(
+                badgeText = "/ PLAIN TEXT STORAGE",
+                badgeColor = palette.project,
+                rightBadgeText = "todo.txt"
             )
-            AsciiHorizontalBorder(corner = "|")
             AsciiBoxBodyRow(
                 text = storageFolderPath,
                 textColor = palette.fgMuted,
-                fontSizeSp = (baseSp - 2).coerceAtLeast(12)
+                fontSizeSp = (baseSp - 2).coerceAtLeast(11)
             )
-            AsciiHorizontalBorder(corner = "|")
             AsciiBoxActionRow(
                 actions = listOf(
                     Triple("[/] Folder", palette.project) { onPickFolderWithSaf() },

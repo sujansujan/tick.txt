@@ -18,12 +18,11 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
 /**
- * Coordinates system notification audio vs. full-screen alarm audio:
- * - Default (`alarmMutedByDefault == true`): Alarm siren is muted; the notification uses
- *   `CHANNEL_NOTIF_SOUND` so only the standard system notification sound plays.
- * - Unmuted (`alarmMutedByDefault == false`): System notification sound is silenced
- *   (`CHANNEL_SILENT_NOTIF` + `setSilent(true)`), and `FullScreenAlarmActivity` plays the
- *   loud alarm ringtone (`TYPE_ALARM`).
+ * Ensures BOTH per-todo `Alarm` (`/a`) and per-todo `Notification` (`/n`) always pop up
+ * full-screen in front (`FullScreenAlarmActivity`), even when the user is using other apps:
+ * - For `Notification` (`/n`) or when alarm is muted: plays system notification sound (`CHANNEL_ID`).
+ * - For unmuted `Alarm` (`/a`): silences system notification sound (`CHANNEL_SILENT_ID`) and plays
+ *   the continuous alarm ringtone.
  */
 class AlarmBroadcastReceiver : BroadcastReceiver() {
 
@@ -34,13 +33,16 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
         val reminderId = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_ID) ?: "default_id"
         val taskId = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_ID) ?: "task_id"
         val rawSpec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC) ?: "0m/a"
-        val taskTitle = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE) ?: "tick.txt task alarm"
-        val remType = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_TYPE) ?: "a"
+        val taskTitle = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE) ?: "tick.txt task"
+        val remType = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_TYPE)
+            ?: if (rawSpec.endsWith("/n")) "n" else "a"
         val notifId = (reminderId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100)
 
         val repo = TickStorageRepository(context)
         val settings = repo.loadSettings()
-        val isAlarmMuted = settings.alarmMutedByDefault
+        // If per-task mode is Notification ("n"), always use notification sound (muted alarm siren);
+        // if per-task mode is Alarm ("a"), use settings.alarmMutedByDefault
+        val isAlarmMuted = if (remType == "n") true else settings.alarmMutedByDefault
         val tickDir = File(repo.baseDir, ".tick").apply { mkdirs() }
         val snoozeStore = SnoozeStateStore(File(tickDir, "alarm-state.json"))
 
@@ -51,7 +53,8 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 val fullScreenIntent = Intent(context, FullScreenAlarmActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                         Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                     putExtra(ReminderScheduler.EXTRA_REMINDER_ID, reminderId)
                     putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
                     putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
@@ -86,22 +89,19 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                     )
                 }
 
-                // When alarm is muted (default), play system notification sound;
-                // when alarm is NOT muted, silence the system notification sound!
                 val channelToUse = if (isAlarmMuted) CHANNEL_ID else CHANNEL_SILENT_ID
-                val audioModeLabel = if (isAlarmMuted) "Muted (System Notification Sound)" else "Unmuted (System Notification Silenced)"
+                val kindLabel = if (remType == "n") "NOTIFICATION" else "ALARM"
 
                 val asciiBigText = buildString {
-                    appendLine("+--------------------------------------+")
-                    appendLine("| Task: ${taskTitle.take(30).padEnd(30)} |")
+                    appendLine("+--[$kindLabel]------------------------+")
+                    appendLine("| [ ] ${taskTitle.take(32).padEnd(32)} |")
                     appendLine("| Spec: rem:${rawSpec.take(26).padEnd(26)} |")
-                    appendLine("| Audio: ${audioModeLabel.take(29).padEnd(29)} |")
                     append("+--------------------------------------+")
                 }
 
                 val builder = NotificationCompat.Builder(context, channelToUse)
                     .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                    .setContentTitle(taskTitle)
+                    .setContentTitle("[$kindLabel] $taskTitle")
                     .setContentText("rem:$rawSpec • Tap to Snooze or Complete")
                     .setStyle(NotificationCompat.BigTextStyle().bigText(asciiBigText))
                     .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -113,22 +113,23 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                     .setAutoCancel(true)
                     .addAction(
                         0,
-                        "Complete",
+                        "[✓] Done",
                         buildActionIntent(ReminderScheduler.ACTION_MARK_DONE, null, 1)
                     )
                     .addAction(
                         0,
-                        "Snooze +5m",
+                        "[zZ +5m]",
                         buildActionIntent(ReminderScheduler.ACTION_SNOOZE_REMINDER, "5m", 2)
                     )
                     .addAction(
                         0,
-                        "Snooze...",
+                        "[zZ Snooze...]",
                         fullScreenPendingIntent
                     )
 
                 nm.notify(notifId, builder.build())
 
+                // Always launch FullScreenAlarmActivity in front for both Alarm ("a") and Notification ("n")
                 runCatching {
                     context.startActivity(fullScreenIntent)
                 }
@@ -140,6 +141,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                         putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
                         putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
                         putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
+                        putExtra(ReminderScheduler.EXTRA_REMINDER_TYPE, remType)
                         putExtra("extra_notif_id", notifId)
                         putExtra("extra_alarm_muted", isAlarmMuted)
                     }
@@ -164,7 +166,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 context.sendBroadcast(
                     Intent(ReminderScheduler.ACTION_TASKS_UPDATED).apply {
                         setPackage(context.packageName)
-                        putExtra("extra_status_msg", "Snoozed +$preset (until $fmtTime)")
+                        putExtra("extra_status_msg", "[zZ] +$preset ($fmtTime)")
                     }
                 )
             }
@@ -187,7 +189,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 context.sendBroadcast(
                     Intent(ReminderScheduler.ACTION_TASKS_UPDATED).apply {
                         setPackage(context.packageName)
-                        putExtra("extra_status_msg", "Completed: $taskTitle")
+                        putExtra("extra_status_msg", "[✓] $taskTitle")
                     }
                 )
             }
@@ -218,9 +220,10 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 "tick.txt Reminders (System Notification Sound)",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Plays standard system notification sound when alarm is in default muted mode"
+                description = "Plays standard system notification sound when in Notification or Muted Alarm mode"
                 enableVibration(true)
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                setBypassDnd(true)
                 setSound(notifUri, notifAudioAttrs)
             }
 
@@ -232,6 +235,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                 description = "Silences system notification sound when unmuted loud alarm is active"
                 enableVibration(false)
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                setBypassDnd(true)
                 setSound(null, null)
             }
 

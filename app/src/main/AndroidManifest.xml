@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Exact alarm & reminder reliability permissions -->
+    <!-- Exact alarm, full-screen intent & overlay permissions so alarms/notifications always pop up in front -->
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -47,10 +48,11 @@
 
         <activity
             android:name=".ui.screens.FullScreenAlarmActivity"
-            android:exported="false"
+            android:exported="true"
             android:showOnLockScreen="true"
+            android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:launchMode="singleInstance"
+            android:launchMode="singleTask"
             android:excludeFromRecents="true" />
 
         <receiver

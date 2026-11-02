@@ -1,11 +1,15 @@
 package com.ticktxt.app.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.ticktxt.app.core.storage.PersistedSettings
 import com.ticktxt.app.ui.theme.FontMode
@@ -14,8 +18,8 @@ import com.ticktxt.app.ui.theme.ThemeMode
 import java.io.File
 
 /**
- * Compact Settings screen where each section header is embedded directly in the top border
- * (`+--[* APPEARANCE]---+`) and all options live inside the box with tight vertical density.
+ * Compact Settings screen with all options strictly inside the full-width ASCII boxes,
+ * plus 1-tap overlay permission so alarms and notifications always pop up in front of other apps.
  */
 @Composable
 fun SettingsScreen(
@@ -29,6 +33,7 @@ fun SettingsScreen(
     onArchiveCompletedTasks: () -> Unit,
     onFireImmediateNotification: () -> Unit
 ) {
+    val context = LocalContext.current
     val palette = LocalTickPalette.current
     val baseSp = settings.fontSizeSp
 
@@ -84,7 +89,7 @@ fun SettingsScreen(
 
         // 2. +--[! REMINDERS & ALARM]----------------------------------+
         Column(modifier = Modifier.fillMaxWidth()) {
-            val normalizedRem = if (settings.defaultTimedReminder == "0m/n") "0m/a" else settings.defaultTimedReminder
+            val normalizedRem = settings.defaultTimedReminder
             AsciiTitledTopBorder(
                 badgeText = "! REMINDERS & ALARM",
                 badgeColor = palette.priorityB,
@@ -103,29 +108,37 @@ fun SettingsScreen(
                 fontSizeSp = baseSp
             )
             AsciiBoxOptionRow(
-                label = "Offset",
+                label = "Default",
                 options = listOf(
-                    "0m/a" to "0m",
+                    "0m/a" to "0m Alarm",
+                    "0m/n" to "0m Notif",
                     "-5m/a" to "-5m",
                     "-15m/a" to "-15m",
                     "-30m/a" to "-30m",
-                    "-1h/a" to "-1h",
-                    "-1d/a" to "-1d"
+                    "-1h/a" to "-1h"
                 ),
                 selectedValue = normalizedRem,
                 onSelect = { onUpdateSettings(settings.copy(defaultTimedReminder = it)) },
                 activeColor = palette.reminder,
                 fontSizeSp = baseSp
             )
-            AsciiBoxLeftRightRow(
-                left = "[!] Test Full-Screen Alarm",
-                right = "[Run >]",
-                leftColor = palette.priorityA,
-                rightColor = palette.priorityA,
-                fontSizeSp = baseSp,
-                boldLeft = true,
-                boldRight = true,
-                onClick = { onFireImmediateNotification() }
+            AsciiBoxActionRow(
+                actions = listOf(
+                    Triple("[!] Pop-Up Over Apps", palette.project) {
+                        runCatching {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${context.packageName}")
+                                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    },
+                    Triple("[> Test Full Screen]", palette.priorityA) {
+                        onFireImmediateNotification()
+                    }
+                ),
+                fontSizeSp = (baseSp - 1).coerceAtLeast(12)
             )
             AsciiHorizontalBorder()
         }
@@ -146,7 +159,7 @@ fun SettingsScreen(
                     ) {
                         onUpdateSettings(settings.copy(autoSyncGoogleCalendar = !settings.autoSyncGoogleCalendar))
                     },
-                    Triple("[#] Sync All Tasks >", palette.contextTag) {
+                    Triple("[# Sync All Tasks >]", palette.contextTag) {
                         onSyncAllToGoogleCalendar()
                     }
                 ),
@@ -169,9 +182,9 @@ fun SettingsScreen(
             )
             AsciiBoxActionRow(
                 actions = listOf(
-                    Triple("[/] Folder", palette.project) { onPickFolderWithSaf() },
-                    Triple("[>] Share", palette.fg) { onOpenSavedFileLocation() },
-                    Triple("[x] Archive", palette.fgMuted) { onArchiveCompletedTasks() }
+                    Triple("[/ Folder]", palette.project) { onPickFolderWithSaf() },
+                    Triple("[> Share]", palette.fg) { onOpenSavedFileLocation() },
+                    Triple("[x Archive]", palette.fgMuted) { onArchiveCompletedTasks() }
                 ),
                 fontSizeSp = (baseSp - 1).coerceAtLeast(12)
             )

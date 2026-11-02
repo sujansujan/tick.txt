@@ -69,12 +69,9 @@ data class ActiveAlarmPayload(
 )
 
 /**
- * Main screen built in https://plaintextsports.com/ style with:
- * - Full-width responsive `+---...---+` character-grid scorecards (`rememberResponsiveInnerCols`)
- * - Properly centered/balanced 3-column top navigation bar (`Tasks | Notes | Settings`)
- * - Wrapping `FlowRow` filter links so no tag is ever clipped on the right edge
- * - Task status/undo banners scoped strictly to the Tasks tab with 4-second auto-dismiss
- * - Default Muted Alarm (plays system notification sound) vs Unmuted Alarm (silences notification sound).
+ * Main screen using native Compose full-width ASCII scorecards (`AsciiHorizontalBorder`,
+ * `AsciiBoxLeftRightRow`, `AsciiBoxBodyRow`) so every box fits 100% of the screen width
+ * without ever wrapping `+---+` or `|` onto a new line.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -127,7 +124,7 @@ fun MainScreen(
     var undoSnapshot by remember { mutableStateOf<List<TodoTask>?>(null) }
     var statusBanner by remember { mutableStateOf<String?>(null) }
 
-    // Auto-dismiss status banner after 4 seconds so it never stays stuck on screen
+    // Auto-dismiss status banner after 4 seconds
     LaunchedEffect(statusBanner) {
         if (statusBanner != null) {
             delay(4000L)
@@ -445,7 +442,7 @@ fun MainScreen(
         return
     }
 
-    BoxWithConstraints(
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.bg)
@@ -453,939 +450,906 @@ fun MainScreen(
             .navigationBarsPadding()
             .imePadding()
     ) {
-        val innerCols = rememberResponsiveInnerCols(constraints, boxFontSizeSp = 13)
-
-        Column(modifier = Modifier.fillMaxSize()) {
-            // =================================================================
-            // PROPERLY ALIGNED 3-COLUMN TOP NAVIGATION BAR
-            // =================================================================
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
+        // =====================================================================
+        // PROPERLY ALIGNED 3-COLUMN TOP NAVIGATION BAR (Never wraps!)
+        // =====================================================================
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp)
+        ) {
+            val openCount = tasks.count { !it.isBlankOrComment && !it.isCompleted }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                val openCount = tasks.count { !it.isBlankOrComment && !it.isCompleted }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    listOf(
-                        "tasks" to "Tasks ($openCount)",
-                        "notes" to "Notes (${notes.size})",
-                        "settings" to "Settings"
-                    ).forEachIndexed { idx, (tabKey, tabLabel) ->
-                        val selected = currentTab == tabKey
-                        val align = when (idx) {
-                            0 -> Alignment.CenterStart
-                            1 -> Alignment.Center
-                            else -> Alignment.CenterEnd
-                        }
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clickable {
-                                    currentTab = tabKey
-                                    statusBanner = null
-                                    editingTask = null
-                                }
-                                .padding(vertical = 8.dp),
-                            contentAlignment = align
-                        ) {
-                            Text(
-                                text = tabLabel,
-                                color = if (selected) palette.project else palette.fg,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = fontScaleSp.sp,
-                                fontFamily = appFont,
-                                textDecoration = TextDecoration.Underline
-                            )
-                        }
+                listOf(
+                    "tasks" to "Tasks ($openCount)",
+                    "notes" to "Notes (${notes.size})",
+                    "settings" to "Settings"
+                ).forEachIndexed { idx, (tabKey, tabLabel) ->
+                    val selected = currentTab == tabKey
+                    val align = when (idx) {
+                        0 -> Alignment.CenterStart
+                        1 -> Alignment.Center
+                        else -> Alignment.CenterEnd
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable {
+                                currentTab = tabKey
+                                statusBanner = null
+                                editingTask = null
+                            }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = align
+                    ) {
+                        Text(
+                            text = tabLabel,
+                            color = if (selected) palette.project else palette.fg,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = fontScaleSp.sp,
+                            fontFamily = appFont,
+                            textDecoration = TextDecoration.Underline
+                        )
                     }
                 }
-                Text(
-                    text = PlainTextSportsAscii.topBorder(innerCols),
-                    color = palette.fgMuted,
-                    fontSize = 13.sp,
-                    fontFamily = monoFont,
-                    modifier = Modifier.fillMaxWidth()
-                )
             }
+            AsciiHorizontalBorder()
+        }
 
-            // =================================================================
-            // MAIN TAB CONTENT
-            // =================================================================
-            when (currentTab) {
-                "tasks" -> {
-                    Column(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        // Task Status / Undo Banner (ONLY shown in Tasks tab, auto-dismisses after 4s)
-                        if (statusBanner != null) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = statusBanner ?: "",
-                                    color = palette.reminder,
-                                    fontSize = (fontScaleSp - 2).sp,
-                                    fontFamily = appFont,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                    if (undoSnapshot != null) {
-                                        Text(
-                                            text = "Undo",
-                                            color = palette.project,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = (fontScaleSp - 2).sp,
-                                            fontFamily = appFont,
-                                            textDecoration = TextDecoration.Underline,
-                                            modifier = Modifier
-                                                .clickable {
-                                                    persistAndSchedule(undoSnapshot!!)
-                                                    undoSnapshot = null
-                                                    statusBanner = null
-                                                }
-                                                .padding(vertical = 4.dp)
-                                        )
-                                    }
+        // =====================================================================
+        // MAIN TAB CONTENT
+        // =====================================================================
+        when (currentTab) {
+            "tasks" -> {
+                Column(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    // Task Status / Undo Banner (ONLY shown in Tasks tab, auto-dismisses after 4s)
+                    if (statusBanner != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = statusBanner ?: "",
+                                color = palette.reminder,
+                                fontSize = (fontScaleSp - 2).sp,
+                                fontFamily = appFont,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                if (undoSnapshot != null) {
                                     Text(
-                                        text = "Dismiss",
-                                        color = palette.fgMuted,
+                                        text = "Undo",
+                                        color = palette.project,
+                                        fontWeight = FontWeight.Bold,
                                         fontSize = (fontScaleSp - 2).sp,
                                         fontFamily = appFont,
                                         textDecoration = TextDecoration.Underline,
                                         modifier = Modifier
-                                            .clickable { statusBanner = null }
+                                            .clickable {
+                                                persistAndSchedule(undoSnapshot!!)
+                                                undoSnapshot = null
+                                                statusBanner = null
+                                            }
                                             .padding(vertical = 4.dp)
                                     )
                                 }
-                            }
-                        }
-
-                        // Wrapping Views / Filter Row (FlowRow so +chocotat, +invoice, @factory never clip!)
-                        FlowRow(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = "Views:",
-                                color = palette.fgMuted,
-                                fontSize = (fontScaleSp - 1).sp,
-                                fontFamily = appFont,
-                                modifier = Modifier.padding(vertical = 4.dp)
-                            )
-                            val filters = listOf(
-                                "open" to "Open",
-                                "all" to "All",
-                                "due" to "Scheduled",
-                                "done" to "Completed"
-                            ) + dynamicProjects.map { it to it } + dynamicContexts.map { it to it }
-
-                            filters.forEach { (fKey, fLabel) ->
-                                val active = activeFilter == fKey
                                 Text(
-                                    text = fLabel,
-                                    color = if (active) palette.project else palette.fg,
-                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                    fontSize = (fontScaleSp - 1).sp,
+                                    text = "Dismiss",
+                                    color = palette.fgMuted,
+                                    fontSize = (fontScaleSp - 2).sp,
                                     fontFamily = appFont,
                                     textDecoration = TextDecoration.Underline,
                                     modifier = Modifier
-                                        .clickable { activeFilter = fKey }
+                                        .clickable { statusBanner = null }
                                         .padding(vertical = 4.dp)
                                 )
                             }
                         }
+                    }
 
-                        // Inline Task Edit & Granular Snooze Scorecard
-                        if (editingTask != null) {
-                            val target = editingTask!!
-                            Column(
+                    // Wrapping Views / Filter Row
+                    FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Views:",
+                            color = palette.fgMuted,
+                            fontSize = (fontScaleSp - 1).sp,
+                            fontFamily = appFont,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                        val filters = listOf(
+                            "open" to "Open",
+                            "all" to "All",
+                            "due" to "Scheduled",
+                            "done" to "Completed"
+                        ) + dynamicProjects.map { it to it } + dynamicContexts.map { it to it }
+
+                        filters.forEach { (fKey, fLabel) ->
+                            val active = activeFilter == fKey
+                            Text(
+                                text = fLabel,
+                                color = if (active) palette.project else palette.fg,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = (fontScaleSp - 1).sp,
+                                fontFamily = appFont,
+                                textDecoration = TextDecoration.Underline,
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Edit & Snooze Task",
-                                        color = palette.fg,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = fontScaleSp.sp,
-                                        fontFamily = appFont
-                                    )
-                                    Text(
-                                        text = "Close",
-                                        color = palette.fgMuted,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable { editingTask = null }
-                                            .padding(vertical = 4.dp)
-                                    )
-                                }
-
-                                Text(
-                                    text = PlainTextSportsAscii.topBorder(innerCols),
-                                    color = palette.fgMuted,
-                                    fontSize = 13.sp,
-                                    fontFamily = monoFont,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                BasicTextField(
-                                    value = editingTaskDraft,
-                                    onValueChange = { editingTaskDraft = it },
-                                    textStyle = TextStyle(fontFamily = monoFont, color = palette.fg, fontSize = fontScaleSp.sp),
-                                    cursorBrush = SolidColor(palette.project),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                )
-                                Text(
-                                    text = PlainTextSportsAscii.botBorder(innerCols),
-                                    color = palette.fgMuted,
-                                    fontSize = 13.sp,
-                                    fontFamily = monoFont,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-
-                                // Wrapping Snooze Unit Links: sec  min  hr  day  wk  mo
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = "Snooze:",
-                                        color = palette.fgMuted,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        modifier = Modifier.padding(vertical = 4.dp)
-                                    )
-                                    SnoozeUnit.entries.forEach { u ->
-                                        val sel = editSnoozeUnit == u
-                                        Text(
-                                            text = u.asciiLabel.lowercase(),
-                                            color = if (sel) palette.project else palette.fg,
-                                            fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
-                                            fontSize = (fontScaleSp - 1).sp,
-                                            fontFamily = appFont,
-                                            textDecoration = TextDecoration.Underline,
-                                            modifier = Modifier
-                                                .clickable {
-                                                    editSnoozeUnit = u
-                                                    if (editSnoozeAmount !in u.quickValues) {
-                                                        editSnoozeAmount = u.quickValues.first()
-                                                    }
-                                                }
-                                                .padding(vertical = 4.dp)
-                                        )
-                                    }
-                                }
-
-                                // Angle-bracket stepper: < - 1    5 min    + 1 >
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = "< - 1",
-                                        color = palette.project,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable { editSnoozeAmount = (editSnoozeAmount - 1).coerceAtLeast(1) }
-                                            .padding(vertical = 4.dp)
-                                    )
-                                    Text(
-                                        text = "$editSnoozeAmount ${editSnoozeUnit.asciiLabel.lowercase()}",
-                                        color = palette.fg,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        modifier = Modifier.padding(vertical = 4.dp)
-                                    )
-                                    Text(
-                                        text = "+ 1 >",
-                                        color = palette.project,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable { editSnoozeAmount = (editSnoozeAmount + 1).coerceAtMost(365) }
-                                            .padding(vertical = 4.dp)
-                                    )
-
-                                    editSnoozeUnit.quickValues.forEach { qv ->
-                                        Text(
-                                            text = "+$qv${editSnoozeUnit.code}",
-                                            color = if (editSnoozeAmount == qv) palette.priorityB else palette.fgMuted,
-                                            fontWeight = if (editSnoozeAmount == qv) FontWeight.Bold else FontWeight.Normal,
-                                            fontSize = (fontScaleSp - 1).sp,
-                                            fontFamily = appFont,
-                                            textDecoration = TextDecoration.Underline,
-                                            modifier = Modifier
-                                                .clickable { editSnoozeAmount = qv }
-                                                .padding(vertical = 4.dp)
-                                        )
-                                    }
-                                }
-
-                                // Action links distributed across full width
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = "Apply Snooze (+$editSnoozeAmount${editSnoozeUnit.code})",
-                                        color = palette.reminder,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable {
-                                                val zdt = ReminderScheduleCalculator.computeGranularSnoozeTarget(
-                                                    ZonedDateTime.now(),
-                                                    editSnoozeAmount.toDouble(),
-                                                    editSnoozeUnit
-                                                )
-                                                val dStr = zdt.toLocalDate().toString()
-                                                val tStr = "%02d:%02d".format(zdt.hour, zdt.minute)
-                                                var parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
-                                                parsed = TodoParser.withUpdatedTag(parsed, "due", dStr)
-                                                parsed = TodoParser.withUpdatedTag(parsed, "duetime", tStr)
-                                                parsed = TodoParser.withReplacedMultiTag(parsed, "rem", listOf("0m/a"))
-                                                editingTaskDraft = TodoParser.serializeLine(parsed)
-
-                                                val delayMs = (zdt.toInstant().toEpochMilli() - System.currentTimeMillis()).coerceAtLeast(1_000L)
-                                                undoSnapshot = tasks
-                                                val updatedTasks = tasks.map { if (it.lineNumber == target.lineNumber) parsed else it }
-                                                tasks = updatedTasks
-                                                storageRepo.saveTasks(updatedTasks)
-                                                scheduleExactDelayAlarm(parsed, delayMs, "0m/a")
-                                                editingTask = null
-                                                statusBanner = "Snoozed +$editSnoozeAmount${editSnoozeUnit.code} (until ${zdt.format(DateTimeFormatter.ofPattern("HH:mm:ss"))})"
-                                            }
-                                            .padding(vertical = 6.dp)
-                                    )
-
-                                    Text(
-                                        text = "Save Task",
-                                        color = palette.project,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable {
-                                                undoSnapshot = tasks
-                                                val reParsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber).copy(isDirty = true)
-                                                persistAndSchedule(
-                                                    tasks.map { if (it.lineNumber == target.lineNumber) reParsed else it }
-                                                )
-                                                editingTask = null
-                                                statusBanner = "Saved task"
-                                            }
-                                            .padding(vertical = 6.dp)
-                                    )
-
-                                    Text(
-                                        text = "Alarm Now",
-                                        color = palette.priorityB,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable {
-                                                val parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
-                                                editingTask = null
-                                                triggerFullAlarmAndNotification(
-                                                    taskTitle = parsed.description,
-                                                    rawSpec = parsed.reminderSpecs.firstOrNull() ?: "0m/a",
-                                                    taskId = parsed.stableId
-                                                )
-                                            }
-                                            .padding(vertical = 6.dp)
-                                    )
-
-                                    Text(
-                                        text = "Delete",
-                                        color = palette.priorityA,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable {
-                                                undoSnapshot = tasks
-                                                persistAndSchedule(tasks.filterNot { it.lineNumber == target.lineNumber })
-                                                editingTask = null
-                                                statusBanner = "Deleted task"
-                                            }
-                                            .padding(vertical = 6.dp)
-                                    )
-                                }
-                            }
+                                    .clickable { activeFilter = fKey }
+                                    .padding(vertical = 4.dp)
+                            )
                         }
+                    }
 
-                        // Full-Width PlainTextSports Scorecard Task List
-                        LazyColumn(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth(),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            if (filteredTasks.isEmpty()) {
-                                item {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 24.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        Text(
-                                            text = PlainTextSportsAscii.centerArt(PlainTextSportsAscii.TROPHY_LINES, innerCols + 4),
-                                            color = palette.project,
-                                            fontSize = 13.sp,
-                                            lineHeight = 16.sp,
-                                            fontFamily = monoFont,
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
-                                        val emptyBox = remember(innerCols) {
-                                            buildString {
-                                                appendLine(PlainTextSportsAscii.topBorder(innerCols))
-                                                appendLine(PlainTextSportsAscii.row("No tasks in this view.", innerCols))
-                                                appendLine(PlainTextSportsAscii.row("Type below to add a task or alarm.", innerCols))
-                                                append(PlainTextSportsAscii.botBorder(innerCols))
-                                            }
-                                        }
-                                        Text(
-                                            text = emptyBox,
-                                            color = palette.fgMuted,
-                                            fontSize = 13.sp,
-                                            lineHeight = 18.sp,
-                                            fontFamily = monoFont,
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
-                                    }
-                                }
-                            } else {
-                                items(filteredTasks, key = { "${it.lineNumber}:${it.rawLine}" }) { task ->
-                                    UsableTaskCard(
-                                        task = task,
-                                        innerCols = innerCols,
-                                        fontSizeSp = fontScaleSp,
-                                        fontScaleSp = fontScaleSp,
-                                        onToggleDone = {
-                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            undoSnapshot = tasks
-                                            val updated = if (task.isCompleted) {
-                                                TodoParser.markIncomplete(task) to null
-                                            } else {
-                                                TodoParser.markCompleted(task, LocalDate.now())
-                                            }
-                                            val nextList = tasks.map {
-                                                if (it.lineNumber == task.lineNumber) updated.first else it
-                                            } + listOfNotNull(
-                                                updated.second?.copy(lineNumber = tasks.size + 1)
-                                            )
-                                            persistAndSchedule(nextList)
-                                        },
-                                        onTapTask = {
-                                            editingTask = task
-                                            editingTaskDraft = TodoParser.serializeLine(task)
-                                        },
-                                        onTriggerAlarmAndSnooze = {
-                                            triggerFullAlarmAndNotification(
-                                                taskTitle = task.description,
-                                                rawSpec = task.reminderSpecs.firstOrNull() ?: "0m/a",
-                                                taskId = task.stableId
-                                            )
-                                        },
-                                        onSyncCalendar = {
-                                            if (gcalManager.hasCalendarPermissions()) {
-                                                val (synced, ok) = gcalManager.syncTaskToGoogleCalendar(task)
-                                                if (ok) {
-                                                    persistAndSchedule(
-                                                        tasks.map { if (it.lineNumber == task.lineNumber) synced else it }
-                                                    )
-                                                    statusBanner = "Synced to Google Calendar: ${task.description}"
-                                                } else {
-                                                    gcalManager.openInGoogleCalendarApp(task)
-                                                }
-                                            } else {
-                                                gcalManager.openInGoogleCalendarApp(task)
-                                            }
-                                        }
-                                    )
-                                }
-                            }
-                        }
-
-                        // Expandable Granular Offset Links (when tapping "+ Time / Snooze Offset")
-                        if (showTimePickerSheet) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = "Unit:",
-                                        color = palette.fgMuted,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        modifier = Modifier.padding(vertical = 4.dp)
-                                    )
-                                    SnoozeUnit.entries.forEach { u ->
-                                        val sel = pickerUnit == u
-                                        Text(
-                                            text = u.asciiLabel.lowercase(),
-                                            color = if (sel) palette.project else palette.fg,
-                                            fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
-                                            fontSize = (fontScaleSp - 1).sp,
-                                            fontFamily = appFont,
-                                            textDecoration = TextDecoration.Underline,
-                                            modifier = Modifier
-                                                .clickable {
-                                                    pickerUnit = u
-                                                    pickerAmount = u.quickValues.first()
-                                                }
-                                                .padding(vertical = 4.dp)
-                                        )
-                                    }
-                                    Text(
-                                        text = "Close",
-                                        color = palette.fgMuted,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable { showTimePickerSheet = false }
-                                            .padding(vertical = 4.dp)
-                                    )
-                                }
-
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = "Offset:",
-                                        color = palette.fgMuted,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        modifier = Modifier.padding(vertical = 4.dp)
-                                    )
-                                    pickerUnit.quickValues.forEach { qv ->
-                                        val chip = "in $qv${pickerUnit.code}"
-                                        Text(
-                                            text = "+$qv${pickerUnit.code}",
-                                            color = palette.reminder,
-                                            fontSize = (fontScaleSp - 1).sp,
-                                            fontFamily = appFont,
-                                            textDecoration = TextDecoration.Underline,
-                                            modifier = Modifier
-                                                .clickable {
-                                                    smartInput = if (smartInput.isBlank()) chip else "${smartInput.trim()} $chip"
-                                                    showTimePickerSheet = false
-                                                }
-                                                .padding(vertical = 4.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Live Smart-Add Preview Links
-                        if (parsePreview != null && parsePreview.recognizedSpans.isNotEmpty()) {
-                            FlowRow(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(text = "Parsed:", color = palette.fgMuted, fontSize = 12.sp, fontFamily = appFont)
-                                parsePreview.recognizedSpans.forEach { span ->
-                                    Text(
-                                        text = "${span.resolvedToken} (x)",
-                                        color = palette.reminder,
-                                        fontSize = 12.sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable { disabledSpans = disabledSpans + span.id }
-                                            .padding(vertical = 2.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        // Full-Width Bottom Quick-Add Input Box (+--------------------------------------+)
+                    // Inline Task Edit & Granular Snooze Scorecard
+                    if (editingTask != null) {
+                        val target = editingTask!!
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(
-                                text = PlainTextSportsAscii.topBorder(innerCols),
-                                color = palette.fgMuted,
-                                fontSize = 13.sp,
-                                fontFamily = monoFont,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "| > ",
-                                    color = palette.project,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                    fontFamily = monoFont
-                                )
-                                Box(
-                                    modifier = Modifier.weight(1f),
-                                    contentAlignment = Alignment.CenterStart
-                                ) {
-                                    if (smartInput.isEmpty()) {
-                                        Text(
-                                            text = "add task (e.g. check chocotat in 1m)",
-                                            color = palette.fgMuted,
-                                            fontSize = 13.sp,
-                                            fontFamily = monoFont,
-                                            maxLines = 1
-                                        )
-                                    }
-                                    BasicTextField(
-                                        value = smartInput,
-                                        onValueChange = {
-                                            smartInput = it
-                                            disabledSpans = emptySet()
-                                        },
-                                        singleLine = true,
-                                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                                        keyboardActions = KeyboardActions(onDone = { submitSmartAdd() }),
-                                        textStyle = TextStyle(
-                                            fontFamily = monoFont,
-                                            color = palette.fg,
-                                            fontSize = 13.sp
-                                        ),
-                                        cursorBrush = SolidColor(palette.project),
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                                Text(
-                                    text = " |",
-                                    color = palette.fgMuted,
-                                    fontSize = 13.sp,
-                                    fontFamily = monoFont
-                                )
-                            }
-                            Text(
-                                text = PlainTextSportsAscii.botBorder(innerCols),
-                                color = palette.fgMuted,
-                                fontSize = 13.sp,
-                                fontFamily = monoFont,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = if (showTimePickerSheet) "Hide Time Offsets" else "+ Time / Snooze Offset",
-                                    color = palette.priorityB,
+                                    text = "Edit & Snooze Task",
+                                    color = palette.fg,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = fontScaleSp.sp,
+                                    fontFamily = appFont
+                                )
+                                Text(
+                                    text = "Close",
+                                    color = palette.fgMuted,
                                     fontSize = (fontScaleSp - 1).sp,
                                     fontFamily = appFont,
                                     textDecoration = TextDecoration.Underline,
                                     modifier = Modifier
-                                        .clickable { showTimePickerSheet = !showTimePickerSheet }
-                                        .padding(vertical = 8.dp)
+                                        .clickable { editingTask = null }
+                                        .padding(vertical = 4.dp)
                                 )
+                            }
 
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                AsciiHorizontalBorder(color = palette.project)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "| ",
+                                        color = palette.project,
+                                        fontSize = 13.sp,
+                                        fontFamily = monoFont
+                                    )
+                                    BasicTextField(
+                                        value = editingTaskDraft,
+                                        onValueChange = { editingTaskDraft = it },
+                                        textStyle = TextStyle(fontFamily = monoFont, color = palette.fg, fontSize = fontScaleSp.sp),
+                                        cursorBrush = SolidColor(palette.project),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(vertical = 6.dp)
+                                    )
+                                    Text(
+                                        text = " |",
+                                        color = palette.project,
+                                        fontSize = 13.sp,
+                                        fontFamily = monoFont
+                                    )
+                                }
+                                AsciiHorizontalBorder(color = palette.project)
+                            }
+
+                            // Wrapping Snooze Unit Links: sec  min  hr  day  wk  mo
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
                                 Text(
-                                    text = "Add Task >",
-                                    color = palette.reminder,
+                                    text = "Snooze:",
+                                    color = palette.fgMuted,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                                SnoozeUnit.entries.forEach { u ->
+                                    val sel = editSnoozeUnit == u
+                                    Text(
+                                        text = u.asciiLabel.lowercase(),
+                                        color = if (sel) palette.project else palette.fg,
+                                        fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = (fontScaleSp - 1).sp,
+                                        fontFamily = appFont,
+                                        textDecoration = TextDecoration.Underline,
+                                        modifier = Modifier
+                                            .clickable {
+                                                editSnoozeUnit = u
+                                                if (editSnoozeAmount !in u.quickValues) {
+                                                    editSnoozeAmount = u.quickValues.first()
+                                                }
+                                            }
+                                            .padding(vertical = 4.dp)
+                                    )
+                                }
+                            }
+
+                            // Angle-bracket stepper: < - 1    5 min    + 1 >
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "< - 1",
+                                    color = palette.project,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = fontScaleSp.sp,
+                                    fontSize = (fontScaleSp - 1).sp,
                                     fontFamily = appFont,
                                     textDecoration = TextDecoration.Underline,
                                     modifier = Modifier
-                                        .clickable { submitSmartAdd() }
-                                        .padding(vertical = 8.dp)
+                                        .clickable { editSnoozeAmount = (editSnoozeAmount - 1).coerceAtLeast(1) }
+                                        .padding(vertical = 4.dp)
                                 )
-                            }
-                        }
-                    }
-                }
-
-                "notes" -> {
-                    val currentNote = notes.firstOrNull { it.filename == selectedNoteName } ?: notes.firstOrNull()
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        // Wrapping Note File Links
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = "Files:",
-                                color = palette.fgMuted,
-                                fontSize = (fontScaleSp - 1).sp,
-                                fontFamily = appFont,
-                                modifier = Modifier.padding(vertical = 4.dp)
-                            )
-                            notes.forEach { n ->
-                                val sel = n.filename == currentNote?.filename
                                 Text(
-                                    text = n.filename,
-                                    color = if (sel) palette.project else palette.fg,
-                                    fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
+                                    text = "$editSnoozeAmount ${editSnoozeUnit.asciiLabel.lowercase()}",
+                                    color = palette.fg,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                                Text(
+                                    text = "+ 1 >",
+                                    color = palette.project,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    textDecoration = TextDecoration.Underline,
+                                    modifier = Modifier
+                                        .clickable { editSnoozeAmount = (editSnoozeAmount + 1).coerceAtMost(365) }
+                                        .padding(vertical = 4.dp)
+                                )
+
+                                editSnoozeUnit.quickValues.forEach { qv ->
+                                    Text(
+                                        text = "+$qv${editSnoozeUnit.code}",
+                                        color = if (editSnoozeAmount == qv) palette.priorityB else palette.fgMuted,
+                                        fontWeight = if (editSnoozeAmount == qv) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = (fontScaleSp - 1).sp,
+                                        fontFamily = appFont,
+                                        textDecoration = TextDecoration.Underline,
+                                        modifier = Modifier
+                                            .clickable { editSnoozeAmount = qv }
+                                            .padding(vertical = 4.dp)
+                                    )
+                                }
+                            }
+
+                            // Action links distributed across full width
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "Apply Snooze (+$editSnoozeAmount${editSnoozeUnit.code})",
+                                    color = palette.reminder,
+                                    fontWeight = FontWeight.Bold,
                                     fontSize = (fontScaleSp - 1).sp,
                                     fontFamily = appFont,
                                     textDecoration = TextDecoration.Underline,
                                     modifier = Modifier
                                         .clickable {
-                                            if (noteEditMode && noteDraftName.isNotBlank()) {
-                                                notes = storageRepo.saveNote(noteDraftName, noteDraftText)
-                                            }
-                                            selectedNoteName = n.filename
-                                            noteEditMode = false
+                                            val zdt = ReminderScheduleCalculator.computeGranularSnoozeTarget(
+                                                ZonedDateTime.now(),
+                                                editSnoozeAmount.toDouble(),
+                                                editSnoozeUnit
+                                            )
+                                            val dStr = zdt.toLocalDate().toString()
+                                            val tStr = "%02d:%02d".format(zdt.hour, zdt.minute)
+                                            var parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+                                            parsed = TodoParser.withUpdatedTag(parsed, "due", dStr)
+                                            parsed = TodoParser.withUpdatedTag(parsed, "duetime", tStr)
+                                            parsed = TodoParser.withReplacedMultiTag(parsed, "rem", listOf("0m/a"))
+                                            editingTaskDraft = TodoParser.serializeLine(parsed)
+
+                                            val delayMs = (zdt.toInstant().toEpochMilli() - System.currentTimeMillis()).coerceAtLeast(1_000L)
+                                            undoSnapshot = tasks
+                                            val updatedTasks = tasks.map { if (it.lineNumber == target.lineNumber) parsed else it }
+                                            tasks = updatedTasks
+                                            storageRepo.saveTasks(updatedTasks)
+                                            scheduleExactDelayAlarm(parsed, delayMs, "0m/a")
+                                            editingTask = null
+                                            statusBanner = "Snoozed +$editSnoozeAmount${editSnoozeUnit.code} (until ${zdt.format(DateTimeFormatter.ofPattern("HH:mm:ss"))})"
                                         }
+                                        .padding(vertical = 6.dp)
+                                )
+
+                                Text(
+                                    text = "Save Task",
+                                    color = palette.project,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    textDecoration = TextDecoration.Underline,
+                                    modifier = Modifier
+                                        .clickable {
+                                            undoSnapshot = tasks
+                                            val reParsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber).copy(isDirty = true)
+                                            persistAndSchedule(
+                                                tasks.map { if (it.lineNumber == target.lineNumber) reParsed else it }
+                                            )
+                                            editingTask = null
+                                            statusBanner = "Saved task"
+                                        }
+                                        .padding(vertical = 6.dp)
+                                )
+
+                                Text(
+                                    text = "Alarm Now",
+                                    color = palette.priorityB,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    textDecoration = TextDecoration.Underline,
+                                    modifier = Modifier
+                                        .clickable {
+                                            val parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+                                            editingTask = null
+                                            triggerFullAlarmAndNotification(
+                                                taskTitle = parsed.description,
+                                                rawSpec = parsed.reminderSpecs.firstOrNull() ?: "0m/a",
+                                                taskId = parsed.stableId
+                                            )
+                                        }
+                                        .padding(vertical = 6.dp)
+                                )
+
+                                Text(
+                                    text = "Delete",
+                                    color = palette.priorityA,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    textDecoration = TextDecoration.Underline,
+                                    modifier = Modifier
+                                        .clickable {
+                                            undoSnapshot = tasks
+                                            persistAndSchedule(tasks.filterNot { it.lineNumber == target.lineNumber })
+                                            editingTask = null
+                                            statusBanner = "Deleted task"
+                                        }
+                                        .padding(vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Native Full-Width PlainTextSports Scorecard Task List
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        if (filteredTasks.isEmpty()) {
+                            item {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = PlainTextSportsAscii.TROPHY_ART,
+                                        color = palette.project,
+                                        fontSize = 13.sp,
+                                        lineHeight = 16.sp,
+                                        fontFamily = monoFont,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        AsciiHorizontalBorder()
+                                        AsciiBoxBodyRow(text = "No tasks in this view.", textColor = palette.fgMuted)
+                                        AsciiBoxBodyRow(text = "Type below to add a task or alarm.", textColor = palette.fgMuted)
+                                        AsciiHorizontalBorder()
+                                    }
+                                }
+                            }
+                        } else {
+                            items(filteredTasks, key = { "${it.lineNumber}:${it.rawLine}" }) { task ->
+                                UsableTaskCard(
+                                    task = task,
+                                    fontSizeSp = fontScaleSp,
+                                    fontScaleSp = fontScaleSp,
+                                    onToggleDone = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        undoSnapshot = tasks
+                                        val updated = if (task.isCompleted) {
+                                            TodoParser.markIncomplete(task) to null
+                                        } else {
+                                            TodoParser.markCompleted(task, LocalDate.now())
+                                        }
+                                        val nextList = tasks.map {
+                                            if (it.lineNumber == task.lineNumber) updated.first else it
+                                        } + listOfNotNull(
+                                            updated.second?.copy(lineNumber = tasks.size + 1)
+                                        )
+                                        persistAndSchedule(nextList)
+                                    },
+                                    onTapTask = {
+                                        editingTask = task
+                                        editingTaskDraft = TodoParser.serializeLine(task)
+                                    },
+                                    onTriggerAlarmAndSnooze = {
+                                        triggerFullAlarmAndNotification(
+                                            taskTitle = task.description,
+                                            rawSpec = task.reminderSpecs.firstOrNull() ?: "0m/a",
+                                            taskId = task.stableId
+                                        )
+                                    },
+                                    onSyncCalendar = {
+                                        if (gcalManager.hasCalendarPermissions()) {
+                                            val (synced, ok) = gcalManager.syncTaskToGoogleCalendar(task)
+                                            if (ok) {
+                                                persistAndSchedule(
+                                                    tasks.map { if (it.lineNumber == task.lineNumber) synced else it }
+                                                )
+                                                statusBanner = "Synced to Google Calendar: ${task.description}"
+                                            } else {
+                                                gcalManager.openInGoogleCalendarApp(task)
+                                            }
+                                        } else {
+                                            gcalManager.openInGoogleCalendarApp(task)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    // Expandable Granular Offset Links
+                    if (showTimePickerSheet) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "Unit:",
+                                    color = palette.fgMuted,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                                SnoozeUnit.entries.forEach { u ->
+                                    val sel = pickerUnit == u
+                                    Text(
+                                        text = u.asciiLabel.lowercase(),
+                                        color = if (sel) palette.project else palette.fg,
+                                        fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = (fontScaleSp - 1).sp,
+                                        fontFamily = appFont,
+                                        textDecoration = TextDecoration.Underline,
+                                        modifier = Modifier
+                                            .clickable {
+                                                pickerUnit = u
+                                                pickerAmount = u.quickValues.first()
+                                            }
+                                            .padding(vertical = 4.dp)
+                                    )
+                                }
+                                Text(
+                                    text = "Close",
+                                    color = palette.fgMuted,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    textDecoration = TextDecoration.Underline,
+                                    modifier = Modifier
+                                        .clickable { showTimePickerSheet = false }
                                         .padding(vertical = 4.dp)
                                 )
                             }
 
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "Offset:",
+                                    color = palette.fgMuted,
+                                    fontSize = (fontScaleSp - 1).sp,
+                                    fontFamily = appFont,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                                pickerUnit.quickValues.forEach { qv ->
+                                    val chip = "in $qv${pickerUnit.code}"
+                                    Text(
+                                        text = "+$qv${pickerUnit.code}",
+                                        color = palette.reminder,
+                                        fontSize = (fontScaleSp - 1).sp,
+                                        fontFamily = appFont,
+                                        textDecoration = TextDecoration.Underline,
+                                        modifier = Modifier
+                                            .clickable {
+                                                smartInput = if (smartInput.isBlank()) chip else "${smartInput.trim()} $chip"
+                                                showTimePickerSheet = false
+                                            }
+                                            .padding(vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Live Smart-Add Preview Links
+                    if (parsePreview != null && parsePreview.recognizedSpans.isNotEmpty()) {
+                        FlowRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(text = "Parsed:", color = palette.fgMuted, fontSize = 12.sp, fontFamily = appFont)
+                            parsePreview.recognizedSpans.forEach { span ->
+                                Text(
+                                    text = "${span.resolvedToken} (x)",
+                                    color = palette.reminder,
+                                    fontSize = 12.sp,
+                                    fontFamily = appFont,
+                                    textDecoration = TextDecoration.Underline,
+                                    modifier = Modifier
+                                        .clickable { disabledSpans = disabledSpans + span.id }
+                                        .padding(vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Native Full-Width Bottom Quick-Add Input Box (Never wraps!)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        AsciiHorizontalBorder()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text(
-                                text = "+ New Note",
+                                text = "| > ",
+                                color = palette.project,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                fontFamily = monoFont,
+                                softWrap = false,
+                                maxLines = 1
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 4.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                if (smartInput.isEmpty()) {
+                                    Text(
+                                        text = "add task (e.g. check chocotat in 1m)",
+                                        color = palette.fgMuted,
+                                        fontSize = 13.sp,
+                                        fontFamily = monoFont,
+                                        maxLines = 1
+                                    )
+                                }
+                                BasicTextField(
+                                    value = smartInput,
+                                    onValueChange = {
+                                        smartInput = it
+                                        disabledSpans = emptySet()
+                                    },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(onDone = { submitSmartAdd() }),
+                                    textStyle = TextStyle(
+                                        fontFamily = monoFont,
+                                        color = palette.fg,
+                                        fontSize = fontScaleSp.sp
+                                    ),
+                                    cursorBrush = SolidColor(palette.project),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            Text(
+                                text = " |",
+                                color = palette.fgMuted,
+                                fontSize = 13.sp,
+                                fontFamily = monoFont,
+                                softWrap = false,
+                                maxLines = 1
+                            )
+                        }
+                        AsciiHorizontalBorder()
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (showTimePickerSheet) "Hide Time Offsets" else "+ Time / Snooze Offset",
+                                color = palette.priorityB,
+                                fontSize = (fontScaleSp - 1).sp,
+                                fontFamily = appFont,
+                                textDecoration = TextDecoration.Underline,
+                                modifier = Modifier
+                                    .clickable { showTimePickerSheet = !showTimePickerSheet }
+                                    .padding(vertical = 8.dp)
+                            )
+
+                            Text(
+                                text = "Add Task >",
                                 color = palette.reminder,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = fontScaleSp.sp,
+                                fontFamily = appFont,
+                                textDecoration = TextDecoration.Underline,
+                                modifier = Modifier
+                                    .clickable { submitSmartAdd() }
+                                    .padding(vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            "notes" -> {
+                val currentNote = notes.firstOrNull { it.filename == selectedNoteName } ?: notes.firstOrNull()
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Wrapping Note File Links
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Files:",
+                            color = palette.fgMuted,
+                            fontSize = (fontScaleSp - 1).sp,
+                            fontFamily = appFont,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                        notes.forEach { n ->
+                            val sel = n.filename == currentNote?.filename
+                            Text(
+                                text = n.filename,
+                                color = if (sel) palette.project else palette.fg,
+                                fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = (fontScaleSp - 1).sp,
+                                fontFamily = appFont,
+                                textDecoration = TextDecoration.Underline,
+                                modifier = Modifier
+                                    .clickable {
+                                        if (noteEditMode && noteDraftName.isNotBlank()) {
+                                            notes = storageRepo.saveNote(noteDraftName, noteDraftText)
+                                        }
+                                        selectedNoteName = n.filename
+                                        noteEditMode = false
+                                    }
+                                    .padding(vertical = 4.dp)
+                            )
+                        }
+
+                        Text(
+                            text = "+ New Note",
+                            color = palette.reminder,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = (fontScaleSp - 1).sp,
+                            fontFamily = appFont,
+                            textDecoration = TextDecoration.Underline,
+                            modifier = Modifier
+                                .clickable {
+                                    val name = "note-${notes.size + 1}.md"
+                                    val initialBody = "# $name\n\n"
+                                    notes = storageRepo.saveNote(name, initialBody)
+                                    selectedNoteName = name
+                                    noteDraftName = name
+                                    noteDraftText = initialBody
+                                    noteEditMode = true
+                                }
+                                .padding(vertical = 4.dp)
+                        )
+                    }
+
+                    if (currentNote != null) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (noteEditMode) "Save Note" else "Edit Note",
+                                color = if (noteEditMode) palette.reminder else palette.project,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = (fontScaleSp - 1).sp,
                                 fontFamily = appFont,
                                 textDecoration = TextDecoration.Underline,
                                 modifier = Modifier
                                     .clickable {
-                                        val name = "note-${notes.size + 1}.md"
-                                        val initialBody = "# $name\n\n"
-                                        notes = storageRepo.saveNote(name, initialBody)
-                                        selectedNoteName = name
-                                        noteDraftName = name
-                                        noteDraftText = initialBody
-                                        noteEditMode = true
+                                        if (noteEditMode) {
+                                            notes = storageRepo.saveNote(currentNote.filename, noteDraftText)
+                                            noteEditMode = false
+                                        } else {
+                                            noteDraftName = currentNote.filename
+                                            noteDraftText = currentNote.rawContent
+                                            noteEditMode = true
+                                        }
                                     }
                                     .padding(vertical = 4.dp)
                             )
-                        }
 
-                        if (currentNote != null) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
+                            if (notes.size > 1) {
                                 Text(
-                                    text = if (noteEditMode) "Save Note" else "Edit Note",
-                                    color = if (noteEditMode) palette.reminder else palette.project,
-                                    fontWeight = FontWeight.Bold,
+                                    text = "Delete Note",
+                                    color = palette.priorityA,
                                     fontSize = (fontScaleSp - 1).sp,
                                     fontFamily = appFont,
                                     textDecoration = TextDecoration.Underline,
                                     modifier = Modifier
                                         .clickable {
-                                            if (noteEditMode) {
-                                                notes = storageRepo.saveNote(currentNote.filename, noteDraftText)
-                                                noteEditMode = false
-                                            } else {
-                                                noteDraftName = currentNote.filename
-                                                noteDraftText = currentNote.rawContent
-                                                noteEditMode = true
-                                            }
+                                            val updated = storageRepo.deleteNote(currentNote.filename)
+                                            notes = updated
+                                            selectedNoteName = updated.firstOrNull()?.filename ?: ""
+                                            noteEditMode = false
                                         }
                                         .padding(vertical = 4.dp)
                                 )
-
-                                if (notes.size > 1) {
-                                    Text(
-                                        text = "Delete Note",
-                                        color = palette.priorityA,
-                                        fontSize = (fontScaleSp - 1).sp,
-                                        fontFamily = appFont,
-                                        textDecoration = TextDecoration.Underline,
-                                        modifier = Modifier
-                                            .clickable {
-                                                val updated = storageRepo.deleteNote(currentNote.filename)
-                                                notes = updated
-                                                selectedNoteName = updated.firstOrNull()?.filename ?: ""
-                                                noteEditMode = false
-                                            }
-                                            .padding(vertical = 4.dp)
-                                    )
-                                }
                             }
+                        }
 
-                            if (noteEditMode) {
-                                Text(
-                                    text = PlainTextSportsAscii.topBorder(innerCols),
-                                    color = palette.fgMuted,
-                                    fontSize = 13.sp,
+                        if (noteEditMode) {
+                            AsciiHorizontalBorder(color = palette.project)
+                            BasicTextField(
+                                value = noteDraftText,
+                                onValueChange = {
+                                    noteDraftText = it
+                                    notes = storageRepo.saveNote(currentNote.filename, it)
+                                },
+                                textStyle = TextStyle(
                                     fontFamily = monoFont,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                BasicTextField(
-                                    value = noteDraftText,
-                                    onValueChange = {
-                                        noteDraftText = it
-                                        notes = storageRepo.saveNote(currentNote.filename, it)
-                                    },
-                                    textStyle = TextStyle(
-                                        fontFamily = monoFont,
-                                        color = palette.fg,
-                                        fontSize = fontScaleSp.sp,
-                                        lineHeight = (fontScaleSp + 6).sp
-                                    ),
-                                    cursorBrush = SolidColor(palette.project),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxWidth()
-                                        .padding(vertical = 8.dp)
-                                )
-                                Text(
-                                    text = PlainTextSportsAscii.botBorder(innerCols),
-                                    color = palette.fgMuted,
-                                    fontSize = 13.sp,
-                                    fontFamily = monoFont,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            } else {
-                                val noteBox = remember(currentNote.filename, currentNote.bodyContent, innerCols) {
-                                    buildString {
-                                        appendLine(PlainTextSportsAscii.topBorder(innerCols))
-                                        appendLine(PlainTextSportsAscii.rowLeftRight(currentNote.filename, "notes/", innerCols))
-                                        appendLine(PlainTextSportsAscii.midDivider(innerCols))
-                                        currentNote.bodyContent.lines().forEach { line ->
-                                            PlainTextSportsAscii.wrapRows(line, innerCols).forEach { appendLine(it) }
-                                        }
-                                        append(PlainTextSportsAscii.botBorder(innerCols))
+                                    color = palette.fg,
+                                    fontSize = fontScaleSp.sp,
+                                    lineHeight = (fontScaleSp + 6).sp
+                                ),
+                                cursorBrush = SolidColor(palette.project),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp)
+                            )
+                            AsciiHorizontalBorder(color = palette.project)
+                        } else {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    .verticalScroll(rememberScrollState())
+                                    .clickable {
+                                        noteDraftName = currentNote.filename
+                                        noteDraftText = currentNote.rawContent
+                                        noteEditMode = true
                                     }
-                                }
-                                Column(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxWidth()
-                                        .verticalScroll(rememberScrollState())
-                                        .clickable {
-                                            noteDraftName = currentNote.filename
-                                            noteDraftText = currentNote.rawContent
-                                            noteEditMode = true
-                                        }
-                                ) {
-                                    Text(
-                                        text = noteBox,
-                                        color = palette.fg,
-                                        fontSize = 13.sp,
-                                        lineHeight = 19.sp,
-                                        fontFamily = monoFont,
-                                        modifier = Modifier.fillMaxWidth()
+                            ) {
+                                AsciiHorizontalBorder()
+                                AsciiBoxLeftRightRow(
+                                    left = currentNote.filename,
+                                    right = "notes/",
+                                    leftColor = palette.project,
+                                    rightColor = palette.fgMuted,
+                                    boldLeft = true
+                                )
+                                AsciiHorizontalBorder(corner = "|")
+                                currentNote.bodyContent.lines().forEach { line ->
+                                    AsciiBoxBodyRow(
+                                        text = line.ifEmpty { " " },
+                                        textColor = if (line.startsWith("#")) palette.project else palette.fg,
+                                        fontSizeSp = fontScaleSp,
+                                        bold = line.startsWith("#")
                                     )
                                 }
+                                AsciiHorizontalBorder()
                             }
                         }
                     }
                 }
+            }
 
-                "settings" -> {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        SettingsScreen(
-                            baseDir = storageRepo.baseDir,
-                            storageFolderPath = settings.customSafUri ?: storageRepo.baseDir.absolutePath,
-                            settings = settings,
-                            onUpdateSettings = onUpdateSettings,
-                            onSyncAllToGoogleCalendar = {
-                                if (gcalManager.hasCalendarPermissions()) {
-                                    val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
-                                    persistAndSchedule(syncedList)
-                                    statusBanner = "Synced $count task(s) to Google Calendar"
-                                } else {
-                                    calendarPermissionLauncher.launch(
-                                        arrayOf(
-                                            Manifest.permission.READ_CALENDAR,
-                                            Manifest.permission.WRITE_CALENDAR
-                                        )
+            "settings" -> {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    SettingsScreen(
+                        baseDir = storageRepo.baseDir,
+                        storageFolderPath = settings.customSafUri ?: storageRepo.baseDir.absolutePath,
+                        settings = settings,
+                        onUpdateSettings = onUpdateSettings,
+                        onSyncAllToGoogleCalendar = {
+                            if (gcalManager.hasCalendarPermissions()) {
+                                val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
+                                persistAndSchedule(syncedList)
+                            } else {
+                                calendarPermissionLauncher.launch(
+                                    arrayOf(
+                                        Manifest.permission.READ_CALENDAR,
+                                        Manifest.permission.WRITE_CALENDAR
                                     )
-                                }
-                            },
-                            onPickFolderWithSaf = { folderPickerLauncher.launch(null) },
-                            onOpenSavedFileLocation = {
-                                val todoFile = storageRepo.todoFile
-                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_SUBJECT, "todo.txt")
-                                    putExtra(
-                                        Intent.EXTRA_TEXT,
-                                        runCatching { todoFile.readText() }.getOrDefault("")
-                                    )
-                                }
-                                runCatching {
-                                    context.startActivity(
-                                        Intent.createChooser(shareIntent, "Share or open todo.txt")
-                                    )
-                                }
-                            },
-                            onArchiveCompletedTasks = {
-                                val completed = tasks.filter { it.isCompleted }
-                                if (completed.isNotEmpty()) {
-                                    undoSnapshot = tasks
-                                    doneLines = doneLines + completed.map { TodoParser.serializeLine(it) }
-                                    storageRepo.saveDoneLines(doneLines)
-                                    persistAndSchedule(tasks.filterNot { it.isCompleted })
-                                }
-                            },
-                            onFireImmediateNotification = {
-                                triggerFullAlarmAndNotification(
-                                    taskTitle = "check chocotat +chocotat @factory",
-                                    rawSpec = "0m/a",
-                                    taskId = "test_alarm"
                                 )
                             }
-                        )
-                    }
+                        },
+                        onPickFolderWithSaf = { folderPickerLauncher.launch(null) },
+                        onOpenSavedFileLocation = {
+                            val todoFile = storageRepo.todoFile
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "todo.txt")
+                                putExtra(
+                                    Intent.EXTRA_TEXT,
+                                    runCatching { todoFile.readText() }.getOrDefault("")
+                                )
+                            }
+                            runCatching {
+                                context.startActivity(
+                                    Intent.createChooser(shareIntent, "Share or open todo.txt")
+                                )
+                            }
+                        },
+                        onArchiveCompletedTasks = {
+                            val completed = tasks.filter { it.isCompleted }
+                            if (completed.isNotEmpty()) {
+                                undoSnapshot = tasks
+                                doneLines = doneLines + completed.map { TodoParser.serializeLine(it) }
+                                storageRepo.saveDoneLines(doneLines)
+                                persistAndSchedule(tasks.filterNot { it.isCompleted })
+                            }
+                        },
+                        onFireImmediateNotification = {
+                            triggerFullAlarmAndNotification(
+                                taskTitle = "check chocotat +chocotat @factory",
+                                rawSpec = "0m/a",
+                                taskId = "test_alarm"
+                            )
+                        }
+                    )
                 }
             }
         }
@@ -1393,15 +1357,13 @@ fun MainScreen(
 }
 
 /**
- * Full-Width PlainTextSports.com Scorecard Task Box:
- * Uses `innerCols` computed from `rememberResponsiveInnerCols` so the `+---...---+` scorecard
- * fills 100% of the screen width, and distributes the underlined action links evenly across
- * the full width underneath.
+ * Native Compose Full-Width Scorecard Task Box:
+ * Uses `AsciiHorizontalBorder`, `AsciiBoxLeftRightRow`, and `AsciiBoxBodyRow` (`Modifier.fillMaxWidth()` + `Modifier.weight(1f)`)
+ * so the box ALWAYS fits 100% of the screen width and NEVER wraps `+---+` or `|` onto a second line.
  */
 @Composable
 private fun UsableTaskCard(
     task: TodoTask,
-    innerCols: Int = PlainTextSportsAscii.DEFAULT_INNER_WIDTH,
     fontSizeSp: Int = 16,
     fontScaleSp: Int = fontSizeSp,
     onToggleDone: () -> Unit,
@@ -1411,7 +1373,6 @@ private fun UsableTaskCard(
 ) {
     val palette = LocalTickPalette.current
     val appFont = LocalTickFontFamily.current
-    val monoFont = FontFamily.Monospace
     val isSyncedToGcal = task.getTagValue("gcal") != null
 
     val statusLeft = buildString {
@@ -1432,35 +1393,43 @@ private fun UsableTaskCard(
 
     val remRight = task.reminderSpecs.firstOrNull()?.let { "rem:$it" } ?: ""
 
-    val scorecardText = remember(task.rawLine, task.isCompleted, innerCols) {
-        buildString {
-            appendLine(PlainTextSportsAscii.topBorder(innerCols))
-            appendLine(PlainTextSportsAscii.rowLeftRight(statusLeft, statusRight, innerCols))
-            PlainTextSportsAscii.wrapRows(task.description.ifEmpty { task.rawLine }, innerCols).forEach {
-                appendLine(it)
-            }
-            if (tagsLine.isNotEmpty() || remRight.isNotEmpty()) {
-                appendLine(PlainTextSportsAscii.rowLeftRight(tagsLine, remRight, innerCols))
-            }
-            append(PlainTextSportsAscii.botBorder(innerCols))
-        }
-    }
-
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
-        // Full-Width PlainTextSports `+---...---+` Box
-        Text(
-            text = scorecardText,
-            color = if (task.isCompleted) palette.fgMuted else palette.fg,
-            fontSize = 13.sp,
-            lineHeight = 18.sp,
-            fontFamily = monoFont,
+        // Native Full-Width PlainTextSports Box (Never wraps!)
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { onTapTask() }
-        )
+        ) {
+            AsciiHorizontalBorder()
+            AsciiBoxLeftRightRow(
+                left = statusLeft,
+                right = statusRight,
+                leftColor = if (task.priority == 'A') palette.priorityA else palette.fg,
+                rightColor = if (task.isCompleted) palette.reminder else palette.priorityB,
+                fontSizeSp = (fontScaleSp - 1).coerceAtLeast(13),
+                boldLeft = true
+            )
+            AsciiBoxBodyRow(
+                text = task.description.ifEmpty { task.rawLine },
+                textColor = if (task.isCompleted) palette.fgMuted else palette.fg,
+                fontSizeSp = fontScaleSp,
+                bold = true,
+                strikethrough = task.isCompleted
+            )
+            if (tagsLine.isNotEmpty() || remRight.isNotEmpty()) {
+                AsciiBoxLeftRightRow(
+                    left = tagsLine,
+                    right = remRight,
+                    leftColor = palette.project,
+                    rightColor = palette.reminder,
+                    fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12)
+                )
+            }
+            AsciiHorizontalBorder()
+        }
 
         // Evenly Distributed Underlined Action Links Across Full Card Width
         Row(

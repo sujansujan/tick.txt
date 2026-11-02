@@ -13,18 +13,18 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ticktxt.app.core.reminders.AlarmBroadcastReceiver
@@ -32,7 +32,6 @@ import com.ticktxt.app.core.reminders.ReminderScheduleCalculator
 import com.ticktxt.app.core.reminders.ReminderScheduler
 import com.ticktxt.app.core.reminders.SnoozeUnit
 import com.ticktxt.app.core.storage.TickStorageRepository
-import com.ticktxt.app.ui.theme.LocalTickFontFamily
 import com.ticktxt.app.ui.theme.LocalTickPalette
 import com.ticktxt.app.ui.theme.TickTxtTheme
 import kotlinx.coroutines.delay
@@ -40,9 +39,87 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
 /**
- * Full-screen lock-screen & pop-up plain-text ASCII Alarm Activity.
- * Uses pure typographic ASCII components (`[!]`, `├─`, `└─`, `(•)`, `[-]`, `[+]`)
- * with generous 48dp+ touch targets and zero visual clutter.
+ * Character-grid ASCII box builder modeled directly after https://plaintextsports.com/
+ * Every line is padded to an exact fixed column width (`INNER_WIDTH = 36`, total width = 40 chars)
+ * so `+--------------------------------------+` and `| ... |` align in a strict character grid
+ * without any CSS/Compose borders or card backgrounds.
+ */
+object PlainTextSportsAscii {
+    const val INNER_WIDTH = 36
+
+    val TOP_BORDER: String = "+${"-".repeat(INNER_WIDTH + 2)}+"
+    val MID_DIVIDER: String = "|${"-".repeat(INNER_WIDTH + 2)}|"
+    val BOT_BORDER: String = TOP_BORDER
+
+    fun row(text: String, width: Int = INNER_WIDTH): String {
+        val clean = text.replace("\n", " ").trimEnd()
+        if (clean.length <= width) {
+            return "| ${clean.padEnd(width)} |"
+        }
+        return wrapRows(clean, width).joinToString("\n")
+    }
+
+    fun wrapRows(text: String, width: Int = INNER_WIDTH): List<String> {
+        val words = text.trim().split(Regex("\\s+"))
+        if (words.isEmpty() || words.first().isEmpty()) {
+            return listOf("| ${"".padEnd(width)} |")
+        }
+        val lines = mutableListOf<String>()
+        var current = StringBuilder()
+        for (word in words) {
+            if (word.length > width) {
+                if (current.isNotEmpty()) {
+                    lines.add("| ${current.toString().padEnd(width)} |")
+                    current = StringBuilder()
+                }
+                word.chunked(width).forEach { chunk ->
+                    lines.add("| ${chunk.padEnd(width)} |")
+                }
+            } else if (current.isEmpty()) {
+                current.append(word)
+            } else if (current.length + 1 + word.length <= width) {
+                current.append(' ').append(word)
+            } else {
+                lines.add("| ${current.toString().padEnd(width)} |")
+                current = StringBuilder(word)
+            }
+        }
+        if (current.isNotEmpty()) {
+            lines.add("| ${current.toString().padEnd(width)} |")
+        }
+        return lines
+    }
+
+    fun rowLeftRight(left: String, right: String, width: Int = INNER_WIDTH): String {
+        val cleanRight = right.trim()
+        val maxLeft = (width - cleanRight.length - 1).coerceAtLeast(1)
+        val cleanLeft = left.trim().take(maxLeft)
+        val spaces = (width - cleanLeft.length - cleanRight.length).coerceAtLeast(1)
+        return "| $cleanLeft${" ".repeat(spaces)}$cleanRight |"
+    }
+
+    val ALARM_BELL_ART: String = listOf(
+        "            .·´‾`·.            ",
+        "           /   |   \\           ",
+        "          |    |    |          ",
+        "          |   / \\   |          ",
+        "         /__––|––__\\         ",
+        "              `v´              "
+    ).joinToString("\n")
+
+    val TROPHY_ART: String = listOf(
+        "            .·´‾`·.            ",
+        "           | \\   / |           ",
+        "            `._|_.´            ",
+        "              _|_              "
+    ).joinToString("\n")
+}
+
+/**
+ * Full-screen lock-screen & pop-up alarm in https://plaintextsports.com/ style:
+ * - Pure character-grid `+--------------------------------------+` scorecard box
+ * - `< -   5 min   + >` angle-bracket stepper and underlined text links
+ * - Granular snooze across Seconds, Minutes, Hours, Days, Weeks, and Months.
  */
 class FullScreenAlarmActivity : ComponentActivity() {
 
@@ -178,11 +255,6 @@ class FullScreenAlarmActivity : ComponentActivity() {
     }
 }
 
-/**
- * Pure Plain-Text + ASCII Component Full-Screen Alarm Surface.
- * Supports granular snooze across Seconds (sec), Minutes (min), Hours (hr),
- * Days (day), Weeks (wk), and Months (mo).
- */
 @Composable
 fun AsciiFullScreenAlarmSurface(
     taskTitle: String,
@@ -194,18 +266,16 @@ fun AsciiFullScreenAlarmSurface(
     onMarkDone: () -> Unit
 ) {
     val palette = LocalTickPalette.current
-    val fontFamily = LocalTickFontFamily.current
+    val monoFont = FontFamily.Monospace
 
     var selectedUnit by remember { mutableStateOf(SnoozeUnit.MINUTES) }
     var snoozeAmount by remember { mutableStateOf(5) }
     var isSoundMuted by remember { mutableStateOf(false) }
-    var blink by remember { mutableStateOf(true) }
     var currentNow by remember { mutableStateOf(ZonedDateTime.now()) }
 
     LaunchedEffect(Unit) {
         while (true) {
-            delay(600L)
-            blink = !blink
+            delay(1000L)
             currentNow = ZonedDateTime.now()
         }
     }
@@ -218,10 +288,10 @@ fun AsciiFullScreenAlarmSurface(
         )
     }
     val previewFormatted = remember(previewTarget) {
-        previewTarget.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+        previewTarget.format(DateTimeFormatter.ofPattern("MMM d, HH:mm:ss"))
     }
     val clockFormatted = remember(currentNow) {
-        currentNow.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+        currentNow.format(DateTimeFormatter.ofPattern("h:mm:ss a"))
     }
 
     Column(
@@ -231,325 +301,249 @@ fun AsciiFullScreenAlarmSurface(
             .statusBarsPadding()
             .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.SpaceBetween
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // =====================================================================
-        // 1. TOP TELEMETRY BAR
-        // =====================================================================
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = if (blink) "[!] ALARM RINGING // $clockFormatted" else "[ ] ALARM RINGING // $clockFormatted",
-                    color = palette.priorityA,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    fontFamily = fontFamily
-                )
-
-                Box(
-                    modifier = Modifier
-                        .heightIn(min = 42.dp)
-                        .border(1.dp, palette.border)
-                        .clickable {
-                            isSoundMuted = true
-                            onMuteSound()
-                        }
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = if (isSoundMuted) "[sound: muted]" else "[sound: on]",
-                        color = if (isSoundMuted) palette.fgMuted else palette.priorityB,
-                        fontSize = 13.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-            }
-            HorizontalDivider(thickness = 1.dp, color = palette.border)
-        }
-
-        // =====================================================================
-        // 2. PLAIN-TEXT TASK TREE PAYLOAD
-        // =====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(
-                text = "┌─ task due now",
-                color = palette.fgMuted,
-                fontSize = 13.sp,
-                fontFamily = fontFamily
-            )
-            Text(
-                text = "│  $taskTitle",
-                color = palette.fg,
-                fontWeight = FontWeight.Bold,
-                fontSize = (fontSizeSp + 6).sp,
-                fontFamily = fontFamily
-            )
-            Text(
-                text = "├─ spec : rem:$rawSpec",
-                color = palette.reminder,
-                fontSize = 14.sp,
-                fontFamily = fontFamily
-            )
-            Text(
-                text = "└─ wake : RTC_WAKEUP + fullScreenIntent",
-                color = palette.fgMuted,
-                fontSize = 13.sp,
-                fontFamily = fontFamily
-            )
-        }
-
-        // =====================================================================
-        // 3. GRANULAR ASCII SNOOZE SELECTOR (sec | min | hr | day | wk | mo)
-        // =====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.bgElevated)
-                .border(1.dp, palette.border)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Text(
-                text = "┌─ snooze unit (sec / min / hr / day / wk / mo)",
-                color = palette.project,
-                fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
-                fontFamily = fontFamily
-            )
-
-            // 6 Unit Radio Controls: (•) min  ( ) sec ...
-            val allUnits = SnoozeUnit.entries
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                allUnits.chunked(3).forEach { rowUnits ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        rowUnits.forEach { unit ->
-                            val isSelected = selectedUnit == unit
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .heightIn(min = 48.dp)
-                                    .background(palette.bg)
-                                    .border(1.dp, if (isSelected) palette.project else palette.border)
-                                    .clickable {
-                                        selectedUnit = unit
-                                        if (snoozeAmount !in unit.quickValues) {
-                                            snoozeAmount = unit.quickValues.first()
-                                        }
-                                    }
-                                    .padding(vertical = 10.dp, horizontal = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = if (isSelected) "(•) ${unit.asciiLabel.lowercase()}" else "( ) ${unit.asciiLabel.lowercase()}",
-                                    color = if (isSelected) palette.project else palette.fgMuted,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    fontSize = 13.sp,
-                                    fontFamily = fontFamily
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ASCII Stepper: [ - ]   05 min   [ + ]
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(width = 64.dp, height = 48.dp)
-                        .background(palette.bg)
-                        .border(1.dp, palette.border)
-                        .clickable { snoozeAmount = (snoozeAmount - 1).coerceAtLeast(1) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "[ - ]",
-                        color = palette.fg,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .background(palette.bg)
-                        .border(1.dp, palette.border),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "+$snoozeAmount ${selectedUnit.fullName.lowercase()}",
-                        color = palette.reminder,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .size(width = 64.dp, height = 48.dp)
-                        .background(palette.bg)
-                        .border(1.dp, palette.border)
-                        .clickable { snoozeAmount = (snoozeAmount + 1).coerceAtMost(365) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "[ + ]",
-                        color = palette.fg,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-            }
-
-            // Quick Values Row for Selected Unit
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                selectedUnit.quickValues.forEach { qVal ->
-                    val activeVal = snoozeAmount == qVal
-                    Box(
-                        modifier = Modifier
-                            .heightIn(min = 44.dp)
-                            .background(palette.bg)
-                            .border(1.dp, if (activeVal) palette.priorityB else palette.border)
-                            .clickable { snoozeAmount = qVal }
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = if (activeVal) "[*$qVal${selectedUnit.code}]" else "[+$qVal${selectedUnit.code}]",
-                            color = if (activeVal) palette.priorityB else palette.fgMuted,
-                            fontWeight = if (activeVal) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 13.sp,
-                            fontFamily = fontFamily
-                        )
-                    }
-                }
-            }
-
-            // Confirm Snooze Trigger
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 52.dp)
-                    .background(palette.bg)
-                    .border(1.dp, palette.project)
-                    .clickable {
-                        onSnoozeWithPreset(selectedUnit.toPresetSpec(snoozeAmount))
-                    }
-                    .padding(vertical = 12.dp, horizontal = 14.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "[ snooze +$snoozeAmount${selectedUnit.code} -> $previewFormatted ]",
-                        color = palette.project,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-            }
-
-            // 1-Tap Cross-Unit Presets
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf("10s", "30s", "1m", "5m", "15m", "1h", "1d", "1w", "1mo").forEach { spec ->
-                    Box(
-                        modifier = Modifier
-                            .heightIn(min = 42.dp)
-                            .background(palette.bg)
-                            .border(1.dp, palette.border)
-                            .clickable { onSnoozeWithPreset(spec) }
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "[+$spec]",
-                            color = palette.contextTag,
-                            fontSize = 13.sp,
-                            fontFamily = fontFamily
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // =====================================================================
-        // 4. BOTTOM PRIMARY ACTIONS: [ dismiss ]   &   [ x mark done ]
-        // =====================================================================
+        // Top status line (PlainTextSports header style)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
+            Text(
+                text = "Alarm triggered: $clockFormatted",
+                color = palette.fgMuted,
+                fontSize = 12.sp,
+                fontFamily = monoFont
+            )
+            Text(
+                text = if (isSoundMuted) "Sound: Muted" else "Mute Sound",
+                color = if (isSoundMuted) palette.fgMuted else palette.priorityB,
+                fontSize = 13.sp,
+                fontFamily = monoFont,
+                textDecoration = TextDecoration.Underline,
                 modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 54.dp)
-                    .background(palette.bgElevated)
-                    .border(1.dp, palette.border)
+                    .clickable {
+                        isSoundMuted = true
+                        onMuteSound()
+                    }
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+            )
+        }
+
+        // Centered ASCII Bell Art (like PlainTextSports championship art)
+        Text(
+            text = PlainTextSportsAscii.ALARM_BELL_ART,
+            color = palette.priorityA,
+            fontSize = 13.sp,
+            lineHeight = 16.sp,
+            fontFamily = monoFont
+        )
+
+        // Task Scorecard Box (+--------------------------------------+)
+        val taskBoxText = remember(taskTitle, rawSpec, clockFormatted) {
+            buildString {
+                appendLine(PlainTextSportsAscii.TOP_BORDER)
+                appendLine(PlainTextSportsAscii.rowLeftRight("ALARM RINGING", "rem:$rawSpec"))
+                appendLine(PlainTextSportsAscii.MID_DIVIDER)
+                PlainTextSportsAscii.wrapRows(taskTitle).forEach { appendLine(it) }
+                append(PlainTextSportsAscii.BOT_BORDER)
+            }
+        }
+        Text(
+            text = taskBoxText,
+            color = palette.fg,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            lineHeight = 19.sp,
+            fontFamily = monoFont
+        )
+
+        // Primary Underlined Action Links (Mark Completed  |  Dismiss Alarm)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "[x] Mark Completed",
+                color = palette.reminder,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                fontFamily = monoFont,
+                textDecoration = TextDecoration.Underline,
+                modifier = Modifier
+                    .clickable { onMarkDone() }
+                    .padding(horizontal = 10.dp, vertical = 12.dp)
+            )
+            Text(
+                text = "Dismiss Alarm",
+                color = palette.fgMuted,
+                fontSize = 16.sp,
+                fontFamily = monoFont,
+                textDecoration = TextDecoration.Underline,
+                modifier = Modifier
                     .clickable { onDismiss() }
-                    .padding(vertical = 14.dp),
-                contentAlignment = Alignment.Center
+                    .padding(horizontal = 10.dp, vertical = 12.dp)
+            )
+        }
+
+        // Granular Snooze Section (PlainTextSports < -  5 min  + > stepper & underlined unit links)
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "Snooze Task",
+                color = palette.fg,
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp,
+                fontFamily = monoFont
+            )
+
+            // Unit Links: Units: sec  min  hr  day  wk  mo
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "[ dismiss alarm ]",
+                    text = "Units:",
                     color = palette.fgMuted,
+                    fontSize = 13.sp,
+                    fontFamily = monoFont
+                )
+                SnoozeUnit.entries.forEach { unit ->
+                    val isSel = selectedUnit == unit
+                    Text(
+                        text = unit.asciiLabel.lowercase(),
+                        color = if (isSel) palette.project else palette.fg,
+                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 14.sp,
+                        fontFamily = monoFont,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier
+                            .clickable {
+                                selectedUnit = unit
+                                if (snoozeAmount !in unit.quickValues) {
+                                    snoozeAmount = unit.quickValues.first()
+                                }
+                            }
+                            .padding(horizontal = 6.dp, vertical = 10.dp)
+                    )
+                }
+            }
+
+            // Angle-bracket stepper: < - 1      5 minutes      + 1 >
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "< - 1",
+                    color = palette.project,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    fontFamily = fontFamily
+                    fontSize = 15.sp,
+                    fontFamily = monoFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable { snoozeAmount = (snoozeAmount - 1).coerceAtLeast(1) }
+                        .padding(horizontal = 10.dp, vertical = 10.dp)
+                )
+
+                Text(
+                    text = "$snoozeAmount ${selectedUnit.fullName.lowercase()}",
+                    color = palette.fg,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    fontFamily = monoFont
+                )
+
+                Text(
+                    text = "+ 1 >",
+                    color = palette.project,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    fontFamily = monoFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable { snoozeAmount = (snoozeAmount + 1).coerceAtMost(365) }
+                        .padding(horizontal = 10.dp, vertical = 10.dp)
                 )
             }
 
-            Box(
+            // Quick values for current unit
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                selectedUnit.quickValues.forEach { qv ->
+                    val isSel = snoozeAmount == qv
+                    Text(
+                        text = "+$qv${selectedUnit.code}",
+                        color = if (isSel) palette.priorityB else palette.fgMuted,
+                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 14.sp,
+                        fontFamily = monoFont,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier
+                            .clickable { snoozeAmount = qv }
+                            .padding(horizontal = 6.dp, vertical = 8.dp)
+                    )
+                }
+            }
+
+            // Snooze Scorecard Box (Tappable to confirm custom snooze)
+            val snoozeBoxText = remember(snoozeAmount, selectedUnit, previewFormatted) {
+                buildString {
+                    appendLine(PlainTextSportsAscii.TOP_BORDER)
+                    appendLine(
+                        PlainTextSportsAscii.rowLeftRight(
+                            "Snooze +$snoozeAmount ${selectedUnit.asciiLabel.lowercase()}",
+                            "Apply >"
+                        )
+                    )
+                    appendLine(PlainTextSportsAscii.row("Until: $previewFormatted"))
+                    append(PlainTextSportsAscii.BOT_BORDER)
+                }
+            }
+            Text(
+                text = snoozeBoxText,
+                color = palette.reminder,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontFamily = monoFont,
                 modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 54.dp)
-                    .background(palette.bgElevated)
-                    .border(1.dp, palette.reminder)
-                    .clickable { onMarkDone() }
-                    .padding(vertical = 14.dp),
-                contentAlignment = Alignment.Center
+                    .clickable { onSnoozeWithPreset(selectedUnit.toPresetSpec(snoozeAmount)) }
+                    .padding(vertical = 4.dp)
+            )
+
+            // 1-Tap Cross-Unit Underlined Links
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "[x mark done]",
-                    color = palette.reminder,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    fontFamily = fontFamily
+                    text = "Quick:",
+                    color = palette.fgMuted,
+                    fontSize = 13.sp,
+                    fontFamily = monoFont
                 )
+                listOf("10s", "30s", "1m", "5m", "15m", "1h", "1d", "1w", "1mo").forEach { spec ->
+                    Text(
+                        text = "+$spec",
+                        color = palette.contextTag,
+                        fontSize = 13.sp,
+                        fontFamily = monoFont,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier
+                            .clickable { onSnoozeWithPreset(spec) }
+                            .padding(horizontal = 4.dp, vertical = 8.dp)
+                    )
+                }
             }
         }
     }

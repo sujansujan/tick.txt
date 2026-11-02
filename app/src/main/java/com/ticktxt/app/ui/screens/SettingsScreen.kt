@@ -1,7 +1,6 @@
 package com.ticktxt.app.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -11,16 +10,23 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ticktxt.app.core.storage.PersistedSettings
 import com.ticktxt.app.ui.theme.FontMode
-import com.ticktxt.app.ui.theme.LocalTickFontFamily
 import com.ticktxt.app.ui.theme.LocalTickPalette
 import com.ticktxt.app.ui.theme.ThemeMode
 import java.io.File
 
+/**
+ * Settings screen built from scratch in https://plaintextsports.com/ style:
+ * - Zero Compose/CSS box borders or filled rectangles
+ * - Character-grid `+--------------------------------------+` scorecards
+ * - Underlined inline text links with generous touch padding.
+ */
 @Composable
 fun SettingsScreen(
     baseDir: File,
@@ -34,7 +40,7 @@ fun SettingsScreen(
     onFireImmediateNotification: () -> Unit
 ) {
     val palette = LocalTickPalette.current
-    val fontFamily = LocalTickFontFamily.current
+    val monoFont = FontFamily.Monospace
 
     Column(
         modifier = Modifier
@@ -42,352 +48,299 @@ fun SettingsScreen(
             .background(palette.bg)
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
         // =====================================================================
-        // 1. ALARM & REMINDER ENGINE
+        // 1. APPEARANCE (Dark Mode | Light Mode, Font, Text Size)
         // =====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.bgElevated)
-                .border(1.dp, palette.border)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                text = "┌─ 01 // alarm & reminder defaults",
-                color = palette.project,
+                text = "Appearance",
+                color = palette.fg,
                 fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                fontFamily = fontFamily
+                fontSize = 16.sp,
+                fontFamily = monoFont
             )
 
-            Text(
-                text = "├─ default trigger for timed tasks:",
-                color = palette.fgMuted,
-                fontSize = 13.sp,
-                fontFamily = fontFamily
-            )
-
+            // Mode: Dark Mode  Light Mode  System
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Text(text = "Mode:", color = palette.fgMuted, fontSize = 14.sp, fontFamily = monoFont)
                 listOf(
-                    "0m/a" to "0m/a (alarm)",
-                    "0m/n" to "0m/n (notif)",
-                    "-5m/a" to "-5m/a",
-                    "-15m/a" to "-15m/a",
-                    "-30m/a" to "-30m/a",
-                    "-1h/a" to "-1h/a",
-                    "-1d/a" to "-1d/a"
-                ).forEach { (spec, label) ->
-                    val selected = settings.defaultTimedReminder == spec
-                    Box(
+                    ThemeMode.DRACULA_DARK to "Dark Mode",
+                    ThemeMode.ALUCARD_LIGHT to "Light Mode",
+                    ThemeMode.SYSTEM to "System"
+                ).forEach { (mode, label) ->
+                    val selected = settings.themeMode == mode
+                    Text(
+                        text = label,
+                        color = if (selected) palette.project else palette.fg,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 14.sp,
+                        fontFamily = monoFont,
+                        textDecoration = TextDecoration.Underline,
                         modifier = Modifier
-                            .heightIn(min = 46.dp)
-                            .background(palette.bg)
-                            .border(1.dp, if (selected) palette.reminder else palette.border)
-                            .clickable { onUpdateSettings(settings.copy(defaultTimedReminder = spec)) }
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = if (selected) "(•) $label" else "( ) $label",
-                            color = if (selected) palette.reminder else palette.fgMuted,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 13.sp,
-                            fontFamily = fontFamily
-                        )
-                    }
+                            .clickable { onUpdateSettings(settings.copy(themeMode = mode)) }
+                            .padding(vertical = 8.dp, horizontal = 4.dp)
+                    )
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .background(palette.bg)
-                    .border(1.dp, palette.priorityA)
-                    .clickable { onFireImmediateNotification() }
-                    .padding(vertical = 12.dp, horizontal = 14.dp),
-                contentAlignment = Alignment.Center
+            // Font: Monospace  System Sans  Serif
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "[!] test full-screen alarm & notification",
-                    color = palette.priorityA,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    fontFamily = fontFamily
-                )
+                Text(text = "Font:", color = palette.fgMuted, fontSize = 14.sp, fontFamily = monoFont)
+                listOf(
+                    FontMode.MONOSPACE to "Monospace",
+                    FontMode.SYSTEM_SANS to "System Sans",
+                    FontMode.SYSTEM_SERIF to "Serif"
+                ).forEach { (fMode, label) ->
+                    val selected = settings.fontMode == fMode
+                    Text(
+                        text = label,
+                        color = if (selected) palette.project else palette.fg,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 14.sp,
+                        fontFamily = monoFont,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier
+                            .clickable { onUpdateSettings(settings.copy(fontMode = fMode)) }
+                            .padding(vertical = 8.dp, horizontal = 4.dp)
+                    )
+                }
+            }
+
+            // Size: 14sp  16sp  18sp  20sp
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Size:", color = palette.fgMuted, fontSize = 14.sp, fontFamily = monoFont)
+                listOf(14, 16, 18, 20).forEach { sz ->
+                    val selected = settings.fontSizeSp == sz
+                    Text(
+                        text = "${sz}sp",
+                        color = if (selected) palette.project else palette.fg,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 14.sp,
+                        fontFamily = monoFont,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier
+                            .clickable { onUpdateSettings(settings.copy(fontSizeSp = sz)) }
+                            .padding(vertical = 8.dp, horizontal = 4.dp)
+                    )
+                }
             }
         }
 
         // =====================================================================
-        // 2. GOOGLE CALENDAR SYNC
+        // 2. REMINDERS & FULL-SCREEN ALARM
         // =====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.bgElevated)
-                .border(1.dp, palette.border)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                text = "┌─ 02 // google calendar sync",
-                color = palette.project,
+                text = "Reminders & Full-Screen Alarm",
+                color = palette.fg,
                 fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                fontFamily = fontFamily
+                fontSize = 16.sp,
+                fontFamily = monoFont
             )
 
             Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Default:", color = palette.fgMuted, fontSize = 14.sp, fontFamily = monoFont)
+                listOf(
+                    "0m/a" to "At Due (Alarm)",
+                    "-5m/a" to "5m Before",
+                    "-15m/a" to "15m Before",
+                    "-30m/a" to "30m Before",
+                    "-1h/a" to "1h Before",
+                    "-1d/a" to "1d Before"
+                ).forEach { (spec, label) ->
+                    val selected = settings.defaultTimedReminder == spec
+                    Text(
+                        text = label,
+                        color = if (selected) palette.reminder else palette.fg,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 14.sp,
+                        fontFamily = monoFont,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier
+                            .clickable { onUpdateSettings(settings.copy(defaultTimedReminder = spec)) }
+                            .padding(vertical = 8.dp, horizontal = 4.dp)
+                    )
+                }
+            }
+
+            val alarmCard = remember(settings.defaultTimedReminder) {
+                buildString {
+                    appendLine(PlainTextSportsAscii.TOP_BORDER)
+                    appendLine(PlainTextSportsAscii.rowLeftRight("Full-Screen Alarm", "Active"))
+                    appendLine(PlainTextSportsAscii.rowLeftRight("Default Spec", "rem:${settings.defaultTimedReminder}"))
+                    appendLine(PlainTextSportsAscii.rowLeftRight("Snooze Units", "sec min hr day wk mo"))
+                    append(PlainTextSportsAscii.BOT_BORDER)
+                }
+            }
+            Text(
+                text = alarmCard,
+                color = palette.fg,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontFamily = monoFont
+            )
+
+            Text(
+                text = "Test Full-Screen Alarm & Notification >",
+                color = palette.priorityA,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                fontFamily = monoFont,
+                textDecoration = TextDecoration.Underline,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .background(palette.bg)
-                    .border(1.dp, palette.border)
-                    .clickable {
-                        onUpdateSettings(settings.copy(autoSyncGoogleCalendar = !settings.autoSyncGoogleCalendar))
-                    }
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .clickable { onFireImmediateNotification() }
+                    .padding(vertical = 8.dp)
+            )
+        }
+
+        // =====================================================================
+        // 3. GOOGLE CALENDAR SYNC
+        // =====================================================================
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "Google Calendar",
+                color = palette.fg,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                fontFamily = monoFont
+            )
+
+            val gcalCard = remember(settings.autoSyncGoogleCalendar) {
+                buildString {
+                    appendLine(PlainTextSportsAscii.TOP_BORDER)
+                    appendLine(
+                        PlainTextSportsAscii.rowLeftRight(
+                            "Auto-Sync Scheduled",
+                            if (settings.autoSyncGoogleCalendar) "ON" else "OFF"
+                        )
+                    )
+                    appendLine(PlainTextSportsAscii.rowLeftRight("Provider", "Android CalendarContract"))
+                    append(PlainTextSportsAscii.BOT_BORDER)
+                }
+            }
+            Text(
+                text = gcalCard,
+                color = palette.fg,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontFamily = monoFont
+            )
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "├─ auto-sync scheduled tasks",
+                    text = if (settings.autoSyncGoogleCalendar) "Disable Auto-Sync" else "Enable Auto-Sync",
                     color = palette.fg,
-                    fontSize = 13.sp,
-                    fontFamily = fontFamily
+                    fontSize = 14.sp,
+                    fontFamily = monoFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable {
+                            onUpdateSettings(settings.copy(autoSyncGoogleCalendar = !settings.autoSyncGoogleCalendar))
+                        }
+                        .padding(vertical = 8.dp)
                 )
-                Text(
-                    text = if (settings.autoSyncGoogleCalendar) "[x] on" else "[ ] off",
-                    color = if (settings.autoSyncGoogleCalendar) palette.reminder else palette.fgMuted,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    fontFamily = fontFamily
-                )
-            }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .background(palette.bg)
-                    .border(1.dp, palette.contextTag)
-                    .clickable { onSyncAllToGoogleCalendar() }
-                    .padding(vertical = 12.dp, horizontal = 14.dp),
-                contentAlignment = Alignment.Center
-            ) {
                 Text(
-                    text = "[ +gcal : sync all scheduled tasks now ]",
+                    text = "Sync All Scheduled Tasks >",
                     color = palette.contextTag,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    fontFamily = fontFamily
+                    fontSize = 14.sp,
+                    fontFamily = monoFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable { onSyncAllToGoogleCalendar() }
+                        .padding(vertical = 8.dp)
                 )
             }
         }
 
         // =====================================================================
-        // 3. APPEARANCE & TYPOGRAPHY
+        // 4. PLAIN TEXT STORAGE (todo.txt & done.txt)
         // =====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.bgElevated)
-                .border(1.dp, palette.border)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                text = "┌─ 03 // theme & typography",
-                color = palette.project,
+                text = "Plain Text Storage",
+                color = palette.fg,
                 fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                fontFamily = fontFamily
+                fontSize = 16.sp,
+                fontFamily = monoFont
             )
 
-            Text(text = "├─ color palette:", color = palette.fgMuted, fontSize = 13.sp, fontFamily = fontFamily)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(
-                    ThemeMode.DRACULA_DARK to "dracula",
-                    ThemeMode.ALUCARD_LIGHT to "alucard",
-                    ThemeMode.SYSTEM to "system"
-                ).forEach { (mode, label) ->
-                    val selected = settings.themeMode == mode
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .background(palette.bg)
-                            .border(1.dp, if (selected) palette.project else palette.border)
-                            .clickable { onUpdateSettings(settings.copy(themeMode = mode)) }
-                            .padding(vertical = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = if (selected) "(•) $label" else "( ) $label",
-                            color = if (selected) palette.project else palette.fgMuted,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 13.sp,
-                            fontFamily = fontFamily
-                        )
-                    }
+            val storageCard = remember(storageFolderPath) {
+                buildString {
+                    appendLine(PlainTextSportsAscii.TOP_BORDER)
+                    appendLine(PlainTextSportsAscii.rowLeftRight("Active File", "todo.txt"))
+                    appendLine(PlainTextSportsAscii.rowLeftRight("Archive File", "done.txt"))
+                    PlainTextSportsAscii.wrapRows(storageFolderPath).forEach { appendLine(it) }
+                    append(PlainTextSportsAscii.BOT_BORDER)
                 }
             }
-
-            Text(text = "├─ font family:", color = palette.fgMuted, fontSize = 13.sp, fontFamily = fontFamily)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(
-                    FontMode.MONOSPACE to "mono",
-                    FontMode.SYSTEM_SANS to "sans",
-                    FontMode.SYSTEM_SERIF to "serif"
-                ).forEach { (fMode, label) ->
-                    val selected = settings.fontMode == fMode
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .background(palette.bg)
-                            .border(1.dp, if (selected) palette.project else palette.border)
-                            .clickable { onUpdateSettings(settings.copy(fontMode = fMode)) }
-                            .padding(vertical = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = if (selected) "(•) $label" else "( ) $label",
-                            color = if (selected) palette.project else palette.fgMuted,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 13.sp,
-                            fontFamily = fMode.toComposeFontFamily()
-                        )
-                    }
-                }
-            }
-
-            Text(text = "└─ text scale:", color = palette.fgMuted, fontSize = 13.sp, fontFamily = fontFamily)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(14, 16, 18, 20).forEach { sz ->
-                    val selected = settings.fontSizeSp == sz
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .background(palette.bg)
-                            .border(1.dp, if (selected) palette.project else palette.border)
-                            .clickable { onUpdateSettings(settings.copy(fontSizeSp = sz)) }
-                            .padding(vertical = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = if (selected) "[*${sz}sp]" else "[ ${sz}sp]",
-                            color = if (selected) palette.project else palette.fgMuted,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 13.sp,
-                            fontFamily = fontFamily
-                        )
-                    }
-                }
-            }
-        }
-
-        // =====================================================================
-        // 4. STORAGE & PLAIN-TEXT FILES
-        // =====================================================================
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.bgElevated)
-                .border(1.dp, palette.border)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
             Text(
-                text = "┌─ 04 // plain-text disk files",
-                color = palette.project,
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                fontFamily = fontFamily
-            )
-            Text(
-                text = "├─ dir : $storageFolderPath",
-                color = palette.fgMuted,
-                fontSize = 12.sp,
-                fontFamily = fontFamily
+                text = storageCard,
+                color = palette.fg,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontFamily = monoFont
             )
 
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .background(palette.bg)
-                        .border(1.dp, palette.project)
-                        .clickable { onPickFolderWithSaf() }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "[ choose folder ]",
-                        color = palette.project,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .background(palette.bg)
-                        .border(1.dp, palette.border)
-                        .clickable { onOpenSavedFileLocation() }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "[ share todo.txt ]",
-                        color = palette.fg,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        fontFamily = fontFamily
-                    )
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .background(palette.bg)
-                    .border(1.dp, palette.border)
-                    .clickable { onArchiveCompletedTasks() }
-                    .padding(vertical = 12.dp),
-                contentAlignment = Alignment.Center
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "[ archive completed (x) -> done.txt ]",
+                    text = "Change Folder",
+                    color = palette.project,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    fontFamily = monoFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable { onPickFolderWithSaf() }
+                        .padding(vertical = 8.dp)
+                )
+
+                Text(
+                    text = "Open / Share todo.txt",
+                    color = palette.fg,
+                    fontSize = 14.sp,
+                    fontFamily = monoFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable { onOpenSavedFileLocation() }
+                        .padding(vertical = 8.dp)
+                )
+
+                Text(
+                    text = "Archive Completed",
                     color = palette.fgMuted,
-                    fontSize = 13.sp,
-                    fontFamily = fontFamily
+                    fontSize = 14.sp,
+                    fontFamily = monoFont,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .clickable { onArchiveCompletedTasks() }
+                        .padding(vertical = 8.dp)
                 )
             }
         }

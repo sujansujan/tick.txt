@@ -18,8 +18,9 @@ import com.ticktxt.app.ui.theme.ThemeMode
 import java.io.File
 
 /**
- * Compact Settings screen with all options strictly inside the full-width ASCII boxes,
- * using the canonical action token vocabulary (`[✓ Archive]`, `[# GCal]`, `[! Test Alert]`, `[! Overlay]`).
+ * Compact Settings screen with all options strictly inside the full-width ASCII boxes:
+ * - System theme as default (`System | Dark | Light`)
+ * - Removed redundant system-notification/audio toggle since all reminders & notifications are full-screen.
  */
 @Composable
 fun SettingsScreen(
@@ -55,9 +56,9 @@ fun SettingsScreen(
             AsciiBoxOptionRow(
                 label = "Mode",
                 options = listOf(
+                    ThemeMode.SYSTEM to "System",
                     ThemeMode.DRACULA_DARK to "Dark",
-                    ThemeMode.ALUCARD_LIGHT to "Light",
-                    ThemeMode.SYSTEM to "System"
+                    ThemeMode.ALUCARD_LIGHT to "Light"
                 ),
                 selectedValue = settings.themeMode,
                 onSelect = { onUpdateSettings(settings.copy(themeMode = it)) },
@@ -95,17 +96,6 @@ fun SettingsScreen(
                 badgeColor = palette.priorityB,
                 rightBadgeText = "rem:$normalizedRem",
                 rightBadgeColor = palette.reminder
-            )
-            AsciiBoxOptionRow(
-                label = "Audio",
-                options = listOf(
-                    true to "Muted (Notif)",
-                    false to "Loud (No Notif)"
-                ),
-                selectedValue = settings.alarmMutedByDefault,
-                onSelect = { onUpdateSettings(settings.copy(alarmMutedByDefault = it)) },
-                activeColor = if (settings.alarmMutedByDefault) palette.reminder else palette.priorityA,
-                fontSizeSp = baseSp
             )
             AsciiBoxOptionRow(
                 label = "Default",

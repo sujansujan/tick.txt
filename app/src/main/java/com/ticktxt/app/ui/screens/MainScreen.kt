@@ -32,6 +32,8 @@ import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -53,6 +55,7 @@ import com.ticktxt.app.core.calendar.GoogleCalendarSyncManager
 import com.ticktxt.app.core.nlp.RulesEngine
 import com.ticktxt.app.core.nlp.SmartAddParser
 import com.ticktxt.app.core.notes.NotesRepository
+import com.ticktxt.app.core.notes.PlainTextSearchIndex
 import com.ticktxt.app.core.reminders.ReminderScheduleCalculator
 import com.ticktxt.app.core.reminders.ReminderScheduler
 import com.ticktxt.app.core.storage.PersistedSettings
@@ -61,8 +64,10 @@ import com.ticktxt.app.core.todotxt.TodoParser
 import com.ticktxt.app.core.todotxt.TodoTask
 import com.ticktxt.app.ui.theme.LocalTickFontFamily
 import com.ticktxt.app.ui.theme.LocalTickPalette
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -70,22 +75,37 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+// Optimization #5: Pre-compiled Regexes
+private val DUE_TAG_REGEX = Regex("\\bdue:\\S+")
+private val DUETIME_TAG_REGEX = Regex("\\bduetime:\\S+")
+
+private fun toggleTagInText(rawText: String, tag: String): String {
+    val tokens = rawText.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.toMutableList()
+    if (tokens.contains(tag)) {
+        tokens.removeAll { it == tag }
+    } else {
+        tokens.add(tag)
+    }
+    return tokens.joinToString(" ")
+}
+
 data class ActiveAlarmPayload(
     val reminderId: String,
     val taskId: String,
     val taskTitle: String,
-    val rawSpec: String,
-    val isAlarmMuted: Boolean = true
+    val rawSpec: String
 )
 
 /**
- * Main screen following a strict, uniform ASCII UX Design System:
- * - Zero CSS/Compose `.border()` rectangles anywhere (even the floating `[+ Add]` button uses pure `+---+` / `|   |` ASCII borders)
- * - Uniform canonical action tokens everywhere (`[+ Add]`, `[✓ Done]`, `[zZ Snooze]`, `[✓ Save]`, `[# GCal]`, `[X Delete]`, `[X Close]`)
- * - Screenshot-1 style "EDIT REMINDER" popup + 3-Column ASCII Wheel Snooze Picker (`AsciiSnoozeWheelPopup`) with touch-drag & Offset/Calendar modes
- * - Smart Priority `(A)->(B)->(C)` & Due-Date sorting + 1-tap Priority selector `(A)/(B)/(C)` in popups
- * - 3-line task cards with live auto-refreshing relative countdown badges (`15 m.`, `2 d.`, `-5 m.`), Swipe Right = Done, Swipe Left = Delete
- * - HorizontalPager tab swiping + multi-step Back gesture navigation.
+ * Main screen following a strict, uniform ASCII UX Design System + All 8 Optimizations:
+ * 1. Incremental Diff-Based Alarm Scheduling (`scheduler.syncTaskSchedules`)
+ * 2. Debounced Background Disk I/O (`Dispatchers.IO` + 300ms note typing debounce)
+ * 3. Lifecycle-Aware Minute-Boundary Clock Tick
+ * 4. 1-Tap `+Project` & `@Context` Quick-Insert Chips in Add & Edit Popups
+ * 5. Pre-Compiled Regexes & Cached Border Strings
+ * 6. VelocityTracker Fling / Momentum Physics on the 3-Column Snooze Wheel
+ * 7. Auto-Focus Keyboard (`FocusRequester`) on `[+ Add]` & `[/ Search]` Open
+ * 8. Inline Search / Filter Bar (`[/]`) across both Tasks and Notes (`PlainTextSearchIndex`).
  */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -120,9 +140,41 @@ fun MainScreen(
     var noteDraftName by remember { mutableStateOf("") }
     var noteDraftText by remember { mutableStateOf("") }
 
+    // Optimization #2: 300ms debounced background I/O for Notes editor typing
+    LaunchedEffect(noteDraftText, noteDraftName, noteEditMode) {
+        if (noteEditMode && noteDraftName.isNotBlank()) {
+            delay(300L)
+            val saved = withContext(Dispatchers.IO) {
+                storageRepo.saveNote(noteDraftName, noteDraftText)
+            }
+            notes = saved
+        }
+    }
+
     // Pager for swiping between tabs (0 = Tasks, 1 = Notes, 2 = Settings)
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
     var activeFilter by remember { mutableStateOf("open") }
+
+    // Optimization #8: Inline Search Bar (`[/]`) powered by PlainTextSearchIndex
+    var showSearchBar by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    val searchFocusRequester = remember { FocusRequester() }
+    val searchIndex = remember(tasks, notes) {
+        PlainTextSearchIndex().apply { rebuildFromFiles(tasks, notes) }
+    }
+    val searchHits = remember(searchIndex, searchQuery) {
+        if (searchQuery.isBlank()) emptyList() else searchIndex.search(searchQuery)
+    }
+    val matchedNoteHits = remember(searchHits) {
+        searchHits.filter { it.kind == "note" }
+    }
+
+    LaunchedEffect(showSearchBar) {
+        if (showSearchBar) {
+            delay(80L)
+            runCatching { searchFocusRequester.requestFocus() }
+        }
+    }
 
     // Navigation history for Back Gesture:
     var lastCommittedPage by remember { mutableStateOf(0) }
@@ -155,6 +207,15 @@ fun MainScreen(
     var disabledSpans by remember { mutableStateOf(setOf<String>()) }
     var showAddSnoozeWheel by remember { mutableStateOf(false) }
 
+    // Optimization #7: Auto-Focus Keyboard when `[+ Add]` Popup opens
+    val addInputFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(showAddTaskPopup, showAddSnoozeWheel) {
+        if (showAddTaskPopup && !showAddSnoozeWheel) {
+            delay(80L)
+            runCatching { addInputFocusRequester.requestFocus() }
+        }
+    }
+
     var showTagsPopup by remember { mutableStateOf(false) }
 
     var activeAlarmOverlay by remember { mutableStateOf<ActiveAlarmPayload?>(null) }
@@ -162,12 +223,14 @@ fun MainScreen(
     var undoSnapshot by remember { mutableStateOf<List<TodoTask>?>(null) }
     var statusBanner by remember { mutableStateOf<String?>(null) }
 
-    // Live-ticking clock so relative countdown badges (`15 m.`, `2 h.`, `-5 m.`) stay accurate automatically
+    // Optimization #3: Lifecycle-Aware Minute-Boundary Clock Tick
+    var isAppResumed by remember { mutableStateOf(true) }
     var currentNow by remember { mutableStateOf(LocalDateTime.now()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(15_000L)
+    LaunchedEffect(isAppResumed) {
+        while (isAppResumed) {
             currentNow = LocalDateTime.now()
+            val delayToNextMinuteMs = (60_000L - (System.currentTimeMillis() % 60_000L)).coerceIn(1_000L, 60_000L)
+            delay(delayToNextMinuteMs)
         }
     }
 
@@ -186,10 +249,14 @@ fun MainScreen(
     ) { perms ->
         val granted = perms[Manifest.permission.WRITE_CALENDAR] == true
         if (granted) {
-            val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
-            tasks = syncedList
-            storageRepo.saveTasks(syncedList)
-            statusBanner = "[# GCal] Synced $count task(s)"
+            coroutineScope.launch(Dispatchers.IO) {
+                val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
+                storageRepo.saveTasks(syncedList)
+                withContext(Dispatchers.Main) {
+                    tasks = syncedList
+                    statusBanner = "[# GCal] Synced $count task(s)"
+                }
+            }
         } else {
             statusBanner = "[!] Calendar permission needed"
         }
@@ -201,20 +268,12 @@ fun MainScreen(
         taskId: String = "immediate",
         typeCode: String = if (rawSpec.endsWith("/n")) "n" else "a"
     ) {
-        val mutedMode = if (typeCode == "n") true else settings.alarmMutedByDefault
-        scheduler.fireImmediateNotification(
-            taskTitle = taskTitle,
-            rawSpec = rawSpec,
-            typeCode = typeCode,
-            taskId = taskId
-        )
-        AlarmAudioController.applyAudioMode(context, isAlarmMuted = mutedMode)
+        AlarmAudioController.triggerAlertAudio(context, isNotificationMode = (typeCode == "n"))
         activeAlarmOverlay = ActiveAlarmPayload(
             reminderId = "$taskId|$rawSpec",
             taskId = taskId,
             taskTitle = taskTitle,
-            rawSpec = rawSpec,
-            isAlarmMuted = mutedMode
+            rawSpec = rawSpec
         )
     }
 
@@ -243,55 +302,71 @@ fun MainScreen(
         }
     }
 
+    // Optimization #1 & #2: Asynchronous Disk I/O + Incremental Diff-Based Alarm Scheduling
     fun persistAndSchedule(
         updatedTasks: List<TodoTask>,
         exactDelayMillisForLastTask: Long? = null,
         lastTaskRawSpec: String = "0m/a",
         syncLastToCalendar: Boolean = false
     ) {
-        var finalTasks = updatedTasks.mapIndexed { idx, t -> t.copy(lineNumber = idx + 1) }
+        val numbered = updatedTasks.mapIndexed { idx, t -> t.copy(lineNumber = idx + 1) }
+        tasks = numbered
 
-        if (syncLastToCalendar && settings.autoSyncGoogleCalendar && finalTasks.isNotEmpty()) {
-            val last = finalTasks.last()
-            if (last.dueDate != null && gcalManager.hasCalendarPermissions()) {
-                val (syncedLast, _) = gcalManager.syncTaskToGoogleCalendar(last)
-                finalTasks = finalTasks.dropLast(1) + syncedLast
-            }
+        if (exactDelayMillisForLastTask != null && numbered.isNotEmpty()) {
+            scheduleExactDelayAlarm(numbered.last(), exactDelayMillisForLastTask, lastTaskRawSpec)
         }
 
-        tasks = finalTasks
-        storageRepo.saveTasks(finalTasks)
-
-        val nowZdt = ZonedDateTime.now()
-        finalTasks.forEachIndexed { idx, t ->
-            val isLastAdded = (idx == finalTasks.lastIndex && exactDelayMillisForLastTask != null)
-            if (isLastAdded && exactDelayMillisForLastTask != null) {
-                scheduleExactDelayAlarm(t, exactDelayMillisForLastTask, lastTaskRawSpec)
-            } else {
-                val instances = ReminderScheduleCalculator.computeSchedulesForTask(t, nowZdt)
-                instances.forEach { inst ->
-                    val targetMs = inst.triggerAt.toInstant().toEpochMilli()
-                    if (targetMs > System.currentTimeMillis() - 5_000L) {
-                        scheduler.scheduleInstance(inst, overrideTriggerEpochMs = targetMs)
+        coroutineScope.launch(Dispatchers.IO) {
+            var finalTasks = numbered
+            if (syncLastToCalendar && settings.autoSyncGoogleCalendar && finalTasks.isNotEmpty()) {
+                val last = finalTasks.last()
+                if (last.dueDate != null && gcalManager.hasCalendarPermissions()) {
+                    val (syncedLast, _) = gcalManager.syncTaskToGoogleCalendar(last)
+                    finalTasks = finalTasks.dropLast(1) + syncedLast
+                    withContext(Dispatchers.Main) {
+                        tasks = finalTasks
                     }
                 }
             }
+            storageRepo.saveTasks(finalTasks)
+            val tasksToSync = if (exactDelayMillisForLastTask != null && finalTasks.isNotEmpty()) {
+                finalTasks.dropLast(1)
+            } else {
+                finalTasks
+            }
+            scheduler.syncTaskSchedules(tasksToSync, ZonedDateTime.now())
         }
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
-                storageRepo.saveTasks(tasks)
-                storageRepo.saveDoneLines(doneLines)
-                storageRepo.saveRulesText(rulesText)
-                if (noteEditMode && noteDraftName.isNotBlank()) {
-                    notes = storageRepo.saveNote(noteDraftName, noteDraftText)
+                isAppResumed = false
+                val snapshotTasks = tasks
+                val snapshotDone = doneLines
+                val snapshotRules = rulesText
+                val shouldSaveNote = noteEditMode && noteDraftName.isNotBlank()
+                val draftName = noteDraftName
+                val draftText = noteDraftText
+                coroutineScope.launch(Dispatchers.IO) {
+                    storageRepo.saveTasks(snapshotTasks)
+                    storageRepo.saveDoneLines(snapshotDone)
+                    storageRepo.saveRulesText(snapshotRules)
+                    if (shouldSaveNote) {
+                        storageRepo.saveNote(draftName, draftText)
+                    }
                 }
             } else if (event == Lifecycle.Event.ON_RESUME) {
-                tasks = storageRepo.loadTasks()
-                notes = storageRepo.loadNotes()
+                isAppResumed = true
                 currentNow = LocalDateTime.now()
+                coroutineScope.launch(Dispatchers.IO) {
+                    val loadedTasks = storageRepo.loadTasks()
+                    val loadedNotes = storageRepo.loadNotes()
+                    withContext(Dispatchers.Main) {
+                        tasks = loadedTasks
+                        notes = loadedNotes
+                    }
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -312,8 +387,7 @@ fun MainScreen(
                         val tId = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_ID) ?: "task"
                         val spec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC) ?: "0m/a"
                         val title = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE) ?: "scheduled task"
-                        val muted = intent.getBooleanExtra("extra_alarm_muted", settings.alarmMutedByDefault)
-                        activeAlarmOverlay = ActiveAlarmPayload(remId, tId, title, spec, muted)
+                        activeAlarmOverlay = ActiveAlarmPayload(remId, tId, title, spec)
                     }
                 }
             }
@@ -331,7 +405,7 @@ fun MainScreen(
     }
 
     // Back gesture state machine:
-    // 1. Closes any open wheel / popup / editor
+    // 1. Closes any open wheel / popup / search / editor
     // 2. Returns to previousPlace (tab/filter) if set
     // 3. Goes to Todo tab (page 0, "open") if not already there
     // 4. Closes the app
@@ -346,9 +420,18 @@ fun MainScreen(
             editingTask != null -> editingTask = null
             showAddTaskPopup -> showAddTaskPopup = false
             showTagsPopup -> showTagsPopup = false
+            showSearchBar -> {
+                searchQuery = ""
+                showSearchBar = false
+            }
             noteEditMode -> {
                 if (noteDraftName.isNotBlank()) {
-                    notes = storageRepo.saveNote(noteDraftName, noteDraftText)
+                    val dName = noteDraftName
+                    val dText = noteDraftText
+                    coroutineScope.launch(Dispatchers.IO) {
+                        val saved = storageRepo.saveNote(dName, dText)
+                        withContext(Dispatchers.Main) { notes = saved }
+                    }
                 }
                 noteEditMode = false
             }
@@ -382,7 +465,9 @@ fun MainScreen(
                 )
             }
             onUpdateSettings(settings.copy(customSafUri = uri.toString()))
-            storageRepo.saveTasks(tasks)
+            coroutineScope.launch(Dispatchers.IO) {
+                storageRepo.saveTasks(tasks)
+            }
         }
     }
 
@@ -396,8 +481,14 @@ fun MainScreen(
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         if (res.isNoteCapture) {
             val fn = NotesRepository.toHumanReadableFilename(res.noteTitle ?: "quick-note", ".md")
-            notes = storageRepo.saveNote(fn, "# ${res.strippedTitle}\n")
-            selectedNoteName = fn
+            val content = "# ${res.strippedTitle}\n"
+            coroutineScope.launch(Dispatchers.IO) {
+                val saved = storageRepo.saveNote(fn, content)
+                withContext(Dispatchers.Main) {
+                    notes = saved
+                    selectedNoteName = fn
+                }
+            }
             smartInput = ""
             addTaskPriority = null
             disabledSpans = emptySet()
@@ -434,12 +525,18 @@ fun MainScreen(
 
     val dynamicProjects = remember(tasks) { tasks.flatMap { it.projects }.distinct().map { "+$it" } }
     val dynamicContexts = remember(tasks) { tasks.flatMap { it.contexts }.distinct().map { "@$it" } }
+    val quickTagChips = remember(dynamicProjects, dynamicContexts) {
+        (dynamicProjects + dynamicContexts).take(8)
+    }
 
-    // Smart sorting: Incomplete first -> Priority (A)->(B)->(C) -> Earliest dueDate & dueTime -> lineNumber
-    val filteredTasks = remember(tasks, activeFilter) {
+    // Smart sorting + live search filtering
+    val filteredTasks = remember(tasks, activeFilter, searchQuery, searchHits) {
+        val matchedTaskIds = if (searchQuery.isBlank()) null else searchHits.filter { it.kind == "task" }.map { it.id }.toSet()
         tasks.filter { task ->
             if (task.isBlankOrComment) return@filter false
+            if (matchedTaskIds != null && task.stableId !in matchedTaskIds) return@filter false
             when {
+                matchedTaskIds != null -> true
                 activeFilter == "open" -> !task.isCompleted
                 activeFilter == "due" -> !task.isCompleted && task.dueDate != null
                 activeFilter == "done" -> task.isCompleted
@@ -465,14 +562,6 @@ fun MainScreen(
             taskTitle = alarm.taskTitle,
             rawSpec = alarm.rawSpec,
             fontSizeSp = fontScaleSp,
-            initialAlarmMuted = alarm.isAlarmMuted,
-            onToggleAlarmMute = { mutedNow ->
-                if (mutedNow) {
-                    AlarmAudioController.playSystemNotificationBeepOnce(context)
-                } else {
-                    AlarmAudioController.applyAudioMode(context, isAlarmMuted = false)
-                }
-            },
             onSnoozeWithPreset = { presetSpec ->
                 AlarmAudioController.stopAll()
                 val targetZdt = ReminderScheduleCalculator.computeSnoozeTarget(ZonedDateTime.now(), presetSpec)
@@ -553,7 +642,7 @@ fun MainScreen(
                                     .fillMaxSize()
                                     .padding(horizontal = 12.dp, vertical = 4.dp)
                             ) {
-                                // 1. Single-Line Top Filter Bar: Open | All | Due | Done | [+@ Tags]
+                                // 1. Single-Line Top Filter Bar: Open | All | Due | Done | [+@ Tags] | [/]
                                 val isTagFiltered = activeFilter.startsWith("+") || activeFilter.startsWith("@")
                                 val tagButtonLabel = if (isTagFiltered) "[*$activeFilter*]" else "[+@ Tags]"
 
@@ -581,7 +670,7 @@ fun MainScreen(
                                             "due" to "Due",
                                             "done" to "Done"
                                         ).forEach { (fKey, fLabel) ->
-                                            val active = activeFilter == fKey
+                                            val active = activeFilter == fKey && searchQuery.isBlank()
                                             Text(
                                                 text = if (active) "[*$fLabel*]" else fLabel,
                                                 color = if (active) palette.project else palette.fg,
@@ -589,7 +678,10 @@ fun MainScreen(
                                                 fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
                                                 fontFamily = appFont,
                                                 modifier = Modifier
-                                                    .clickable { updateFilterWithHistory(fKey) }
+                                                    .clickable {
+                                                        searchQuery = ""
+                                                        updateFilterWithHistory(fKey)
+                                                    }
                                                     .padding(vertical = 2.dp, horizontal = 2.dp)
                                             )
                                         }
@@ -604,6 +696,20 @@ fun MainScreen(
                                                 .clickable { showTagsPopup = true }
                                                 .padding(vertical = 2.dp, horizontal = 2.dp)
                                         )
+
+                                        Text(
+                                            text = if (showSearchBar || searchQuery.isNotBlank()) "[*/Search*]" else "[/]",
+                                            color = if (showSearchBar || searchQuery.isNotBlank()) palette.reminder else palette.fgMuted,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
+                                            fontFamily = monoFont,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    showSearchBar = !showSearchBar
+                                                    if (!showSearchBar) searchQuery = ""
+                                                }
+                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                        )
                                     }
                                     Text(
                                         text = " |",
@@ -613,6 +719,92 @@ fun MainScreen(
                                     )
                                 }
                                 AsciiHorizontalBorder()
+
+                                // Optimization #8: Expandable Inline ASCII Search Row across Tasks & Notes
+                                if (showSearchBar) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "| / ",
+                                            color = palette.reminder,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            fontFamily = monoFont
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .padding(vertical = 2.dp),
+                                            contentAlignment = Alignment.CenterStart
+                                        ) {
+                                            if (searchQuery.isEmpty()) {
+                                                Text(
+                                                    text = "Search tasks & notes...",
+                                                    color = palette.fgMuted,
+                                                    fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
+                                                    fontFamily = monoFont,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                            BasicTextField(
+                                                value = searchQuery,
+                                                onValueChange = { searchQuery = it },
+                                                singleLine = true,
+                                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+                                                textStyle = TextStyle(
+                                                    fontFamily = monoFont,
+                                                    color = palette.fg,
+                                                    fontSize = (fontScaleSp - 1).coerceAtLeast(13).sp
+                                                ),
+                                                cursorBrush = SolidColor(palette.reminder),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .focusRequester(searchFocusRequester)
+                                            )
+                                        }
+                                        Text(
+                                            text = "[X Close]",
+                                            color = palette.fgMuted,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            fontFamily = monoFont,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    searchQuery = ""
+                                                    showSearchBar = false
+                                                    focusManager.clearFocus()
+                                                }
+                                                .padding(horizontal = 4.dp)
+                                        )
+                                        Text(
+                                            text = " |",
+                                            color = palette.fgMuted,
+                                            fontSize = 12.sp,
+                                            fontFamily = monoFont
+                                        )
+                                    }
+                                    if (matchedNoteHits.isNotEmpty()) {
+                                        AsciiBoxOptionRow(
+                                            label = "[/ Notes]",
+                                            options = matchedNoteHits.map { it.id to it.title },
+                                            selectedValue = "",
+                                            onSelect = { noteFile ->
+                                                selectedNoteName = noteFile
+                                                showSearchBar = false
+                                                searchQuery = ""
+                                                coroutineScope.launch { pagerState.animateScrollToPage(1) }
+                                            },
+                                            activeColor = palette.project,
+                                            fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12)
+                                        )
+                                    }
+                                    AsciiHorizontalBorder()
+                                }
 
                                 // Status / Undo Row
                                 if (statusBanner != null) {
@@ -654,7 +846,7 @@ fun MainScreen(
                                             ) {
                                                 AsciiTitledTopBorder(badgeText = "EMPTY", badgeColor = palette.fgMuted)
                                                 AsciiBoxLeftRightRow(
-                                                    left = "No tasks in [$activeFilter]",
+                                                    left = if (searchQuery.isNotBlank()) "No matches for \"$searchQuery\"" else "No tasks in [$activeFilter]",
                                                     right = "[+ Add]",
                                                     leftColor = palette.fgMuted,
                                                     rightColor = palette.reminder,
@@ -818,11 +1010,14 @@ fun MainScreen(
                                 onRightBadgeClick = {
                                     val name = "note-${notes.size + 1}.md"
                                     val initialBody = "# $name\n\n"
-                                    notes = storageRepo.saveNote(name, initialBody)
                                     selectedNoteName = name
                                     noteDraftName = name
                                     noteDraftText = initialBody
                                     noteEditMode = true
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        val saved = storageRepo.saveNote(name, initialBody)
+                                        withContext(Dispatchers.Main) { notes = saved }
+                                    }
                                 }
                             )
                             AsciiBoxOptionRow(
@@ -831,7 +1026,12 @@ fun MainScreen(
                                 selectedValue = currentNote?.filename ?: "",
                                 onSelect = { fname ->
                                     if (noteEditMode && noteDraftName.isNotBlank()) {
-                                        notes = storageRepo.saveNote(noteDraftName, noteDraftText)
+                                        val dName = noteDraftName
+                                        val dText = noteDraftText
+                                        coroutineScope.launch(Dispatchers.IO) {
+                                            val saved = storageRepo.saveNote(dName, dText)
+                                            withContext(Dispatchers.Main) { notes = saved }
+                                        }
                                     }
                                     selectedNoteName = fname
                                     noteEditMode = false
@@ -848,8 +1048,13 @@ fun MainScreen(
                                             if (noteEditMode) palette.reminder else palette.project
                                         ) {
                                             if (noteEditMode) {
-                                                notes = storageRepo.saveNote(currentNote.filename, noteDraftText)
+                                                val fname = currentNote.filename
+                                                val text = noteDraftText
                                                 noteEditMode = false
+                                                coroutineScope.launch(Dispatchers.IO) {
+                                                    val saved = storageRepo.saveNote(fname, text)
+                                                    withContext(Dispatchers.Main) { notes = saved }
+                                                }
                                             } else {
                                                 noteDraftName = currentNote.filename
                                                 noteDraftText = currentNote.rawContent
@@ -861,20 +1066,28 @@ fun MainScreen(
                                         Triple("[+ Add]", palette.reminder) {
                                             val name = "note-${notes.size + 1}.md"
                                             val initialBody = "# $name\n\n"
-                                            notes = storageRepo.saveNote(name, initialBody)
                                             selectedNoteName = name
                                             noteDraftName = name
                                             noteDraftText = initialBody
                                             noteEditMode = true
+                                            coroutineScope.launch(Dispatchers.IO) {
+                                                val saved = storageRepo.saveNote(name, initialBody)
+                                                withContext(Dispatchers.Main) { notes = saved }
+                                            }
                                         }
                                     )
                                     if (notes.size > 1) {
                                         add(
                                             Triple("[X Delete]", palette.priorityA) {
-                                                val updated = storageRepo.deleteNote(currentNote.filename)
-                                                notes = updated
-                                                selectedNoteName = updated.firstOrNull()?.filename ?: ""
+                                                val fname = currentNote.filename
                                                 noteEditMode = false
+                                                coroutineScope.launch(Dispatchers.IO) {
+                                                    val updated = storageRepo.deleteNote(fname)
+                                                    withContext(Dispatchers.Main) {
+                                                        notes = updated
+                                                        selectedNoteName = updated.firstOrNull()?.filename ?: ""
+                                                    }
+                                                }
                                             }
                                         )
                                     }
@@ -899,10 +1112,7 @@ fun MainScreen(
                                         )
                                         BasicTextField(
                                             value = noteDraftText,
-                                            onValueChange = {
-                                                noteDraftText = it
-                                                notes = storageRepo.saveNote(currentNote.filename, it)
-                                            },
+                                            onValueChange = { noteDraftText = it },
                                             textStyle = TextStyle(
                                                 fontFamily = monoFont,
                                                 color = palette.fg,
@@ -958,8 +1168,13 @@ fun MainScreen(
                             onUpdateSettings = onUpdateSettings,
                             onSyncAllToGoogleCalendar = {
                                 if (gcalManager.hasCalendarPermissions()) {
-                                    val (syncedList, _) = gcalManager.syncAllDueTasks(tasks)
-                                    persistAndSchedule(syncedList)
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
+                                        withContext(Dispatchers.Main) {
+                                            persistAndSchedule(syncedList)
+                                            statusBanner = "[# GCal] Synced $count task(s)"
+                                        }
+                                    }
                                 } else {
                                     calendarPermissionLauncher.launch(
                                         arrayOf(
@@ -990,8 +1205,11 @@ fun MainScreen(
                                 val completed = tasks.filter { it.isCompleted }
                                 if (completed.isNotEmpty()) {
                                     undoSnapshot = tasks
-                                    doneLines = doneLines + completed.map { TodoParser.serializeLine(it) }
-                                    storageRepo.saveDoneLines(doneLines)
+                                    val newDone = doneLines + completed.map { TodoParser.serializeLine(it) }
+                                    doneLines = newDone
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        storageRepo.saveDoneLines(newDone)
+                                    }
                                     persistAndSchedule(tasks.filterNot { it.isCompleted })
                                 }
                             },
@@ -1196,8 +1414,7 @@ fun MainScreen(
 
                         undoSnapshot = tasks
                         val updatedTasks = tasks.map { if (it.lineNumber == target.lineNumber) updated else it }
-                        tasks = updatedTasks
-                        storageRepo.saveTasks(updatedTasks)
+                        persistAndSchedule(updatedTasks)
                         scheduleExactDelayAlarm(updated, delayMs, specStr)
                         showEditSnoozeWheel = false
                         editingTask = null
@@ -1226,7 +1443,6 @@ fun MainScreen(
                             ) {}
                             .padding(10.dp)
                     ) {
-                        // Top Header matching Screenshot 1 ("EDIT REMINDER") + 1-tap +10m Quick Snooze
                         AsciiTitledTopBorder(
                             badgeText = "/ EDIT REMINDER",
                             badgeColor = palette.reminder,
@@ -1264,6 +1480,21 @@ fun MainScreen(
                             )
                         }
                         AsciiHorizontalBorder(corner = "|")
+
+                        // Optimization #4: 1-Tap `+Project` & `@Context` Quick-Toggle Chips
+                        if (quickTagChips.isNotEmpty()) {
+                            AsciiBoxOptionRow(
+                                label = "[+@ Tag]",
+                                options = quickTagChips.map { it to it },
+                                selectedValue = "",
+                                onSelect = { tag ->
+                                    editingTaskDraft = toggleTagInText(editingTaskDraft, tag)
+                                },
+                                activeColor = palette.project,
+                                fontSizeSp = (fontScaleSp - 2).coerceAtLeast(11)
+                            )
+                            AsciiHorizontalBorder(corner = "|")
+                        }
 
                         // Row 2: 1-Tap Priority Selector (`None | (A) | (B) | (C)`)
                         val currentPriKey = parsedDraft.priority?.toString() ?: ""
@@ -1395,8 +1626,8 @@ fun MainScreen(
                         val dStr = chosenDate.toString()
                         val tStr = "%02d:%02d".format(chosenTime.hour, chosenTime.minute)
                         val cleaned = smartInput
-                            .replace(Regex("\\bdue:\\S+"), "")
-                            .replace(Regex("\\bduetime:\\S+"), "")
+                            .replace(DUE_TAG_REGEX, "")
+                            .replace(DUETIME_TAG_REGEX, "")
                             .trim()
                         smartInput = "$cleaned due:$dStr duetime:$tStr".trim()
                         showAddSnoozeWheel = false
@@ -1472,7 +1703,9 @@ fun MainScreen(
                                         fontSize = fontScaleSp.sp
                                     ),
                                     cursorBrush = SolidColor(palette.reminder),
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .focusRequester(addInputFocusRequester)
                                 )
                             }
                             Text(
@@ -1492,6 +1725,21 @@ fun MainScreen(
                                 onSelect = { spanId -> disabledSpans = disabledSpans + spanId },
                                 activeColor = palette.reminder,
                                 fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
+                            )
+                        }
+
+                        // Optimization #4: 1-Tap `+Project` & `@Context` Chips in Add Popup
+                        if (quickTagChips.isNotEmpty()) {
+                            AsciiHorizontalBorder(corner = "|")
+                            AsciiBoxOptionRow(
+                                label = "[+@ Tag]",
+                                options = quickTagChips.map { it to it },
+                                selectedValue = "",
+                                onSelect = { tag ->
+                                    smartInput = toggleTagInText(smartInput, tag)
+                                },
+                                activeColor = palette.project,
+                                fontSizeSp = (fontScaleSp - 2).coerceAtLeast(11)
                             )
                         }
 

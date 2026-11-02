@@ -13,11 +13,10 @@ import com.ticktxt.app.ui.theme.ThemeMode
 import java.io.File
 
 data class PersistedSettings(
-    val themeMode: ThemeMode = ThemeMode.DRACULA_DARK,
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val fontMode: FontMode = FontMode.MONOSPACE,
     val fontSizeSp: Int = 16,
     val autoSyncGoogleCalendar: Boolean = true,
-    val alarmMutedByDefault: Boolean = true,
     val defaultTimedReminder: String = "0m/a",
     val defaultDateOnlyReminder: String = "09:00/a",
     val customSafUri: String? = null
@@ -26,7 +25,7 @@ data class PersistedSettings(
 /**
  * Single source-of-truth disk manager for `todo.txt`, `done.txt`, `tick.rules.txt`,
  * `notes/`, and `SharedPreferences` settings.
- * Ensures every edit is immediately written to disk and survives app close / reboot.
+ * Ensures every edit is persisted atomically and survives app close / reboot.
  */
 class TickStorageRepository(private val context: Context) {
 
@@ -135,22 +134,19 @@ class TickStorageRepository(private val context: Context) {
     }
 
     fun loadSettings(): PersistedSettings {
-        val themeStr = prefs.getString(KEY_THEME, ThemeMode.DRACULA_DARK.name) ?: ThemeMode.DRACULA_DARK.name
+        val themeStr = prefs.getString(KEY_THEME, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name
         val fontStr = prefs.getString(KEY_FONT_MODE, FontMode.MONOSPACE.name) ?: FontMode.MONOSPACE.name
         val sizeSp = prefs.getInt(KEY_FONT_SIZE, 16)
         val autoSyncCal = prefs.getBoolean(KEY_AUTO_GCAL, true)
-        val alarmMutedDef = prefs.getBoolean(KEY_ALARM_MUTED_DEFAULT, true)
-        val rawTimedRem = prefs.getString(KEY_TIMED_REM, "0m/a") ?: "0m/a"
-        val timedRem = if (rawTimedRem == "0m/n") "0m/a" else rawTimedRem
+        val timedRem = prefs.getString(KEY_TIMED_REM, "0m/a") ?: "0m/a"
         val dateOnlyRem = prefs.getString(KEY_DATE_REM, "09:00/a") ?: "09:00/a"
         val safUri = prefs.getString(KEY_SAF_URI, null)
 
         return PersistedSettings(
-            themeMode = runCatching { ThemeMode.valueOf(themeStr) }.getOrDefault(ThemeMode.DRACULA_DARK),
+            themeMode = runCatching { ThemeMode.valueOf(themeStr) }.getOrDefault(ThemeMode.SYSTEM),
             fontMode = runCatching { FontMode.valueOf(fontStr) }.getOrDefault(FontMode.MONOSPACE),
             fontSizeSp = sizeSp,
             autoSyncGoogleCalendar = autoSyncCal,
-            alarmMutedByDefault = alarmMutedDef,
             defaultTimedReminder = timedRem,
             defaultDateOnlyReminder = dateOnlyRem,
             customSafUri = safUri
@@ -163,7 +159,6 @@ class TickStorageRepository(private val context: Context) {
             .putString(KEY_FONT_MODE, settings.fontMode.name)
             .putInt(KEY_FONT_SIZE, settings.fontSizeSp)
             .putBoolean(KEY_AUTO_GCAL, settings.autoSyncGoogleCalendar)
-            .putBoolean(KEY_ALARM_MUTED_DEFAULT, settings.alarmMutedByDefault)
             .putString(KEY_TIMED_REM, settings.defaultTimedReminder)
             .putString(KEY_DATE_REM, settings.defaultDateOnlyReminder)
             .putString(KEY_SAF_URI, settings.customSafUri)
@@ -202,6 +197,5 @@ class TickStorageRepository(private val context: Context) {
         private const val KEY_DATE_REM = "pref_date_rem"
         private const val KEY_SAF_URI = "pref_saf_uri"
         private const val KEY_AUTO_GCAL = "pref_auto_gcal"
-        private const val KEY_ALARM_MUTED_DEFAULT = "pref_alarm_muted_default"
     }
 }

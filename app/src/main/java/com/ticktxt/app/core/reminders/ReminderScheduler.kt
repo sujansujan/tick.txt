@@ -6,7 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.PowerManager
+import com.ticktxt.app.core.todotxt.TodoTask
 import com.ticktxt.app.ui.screens.FullScreenAlarmActivity
+import java.time.ZonedDateTime
+import java.util.concurrent.ConcurrentHashMap
 
 data class PermissionDiagnostics(
     val canScheduleExactAlarms: Boolean,
@@ -18,13 +21,15 @@ data class PermissionDiagnostics(
 
 /**
  * Schedules exact Android alarms that fire reliably even in Doze mode.
- * Uses `AlarmManager.setAlarmClock(...)` with `FullScreenAlarmActivity` as the showIntent
- * so every task reminder wakes the screen and displays the Full-Screen ASCII Alarm + Notification.
+ * Includes incremental diff-based scheduling (`syncTaskSchedules`) so unchanged tasks
+ * never trigger redundant `AlarmManager` binder calls, while completed/deleted tasks
+ * have their pending alarms canceled immediately.
  */
 class ReminderScheduler(private val context: Context) {
 
     private val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private val diffPrefs = context.getSharedPreferences(DIFF_PREFS_NAME, Context.MODE_PRIVATE)
 
     fun canScheduleExact(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -36,6 +41,73 @@ class ReminderScheduler(private val context: Context) {
 
     fun isIgnoringBatteryOptimizations(): Boolean {
         return powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    /**
+     * Optimization #1: Incremental Diff-Based Alarm Sync.
+     * Compares desired future reminder triggers against `scheduledCache`:
+     * - Cancels any previously scheduled reminderId that was removed or completed.
+     * - Registers `AlarmManager.setAlarmClock` ONLY for newly added or modified trigger times.
+     */
+    fun syncTaskSchedules(
+        tasks: List<TodoTask>,
+        now: ZonedDateTime = ZonedDateTime.now(),
+        forceAll: Boolean = false
+    ) {
+        ensureCacheLoaded()
+        val nowMs = System.currentTimeMillis()
+        val desired = HashMap<String, Pair<ScheduledReminderInstance, Long>>()
+
+        for (task in tasks) {
+            if (task.isCompleted || task.isBlankOrComment) continue
+            val instances = ReminderScheduleCalculator.computeSchedulesForTask(task, now)
+            for (inst in instances) {
+                val targetMs = inst.triggerAt.toInstant().toEpochMilli()
+                if (targetMs > nowMs - 5_000L) {
+                    desired[inst.reminderId] = inst to targetMs
+                }
+            }
+        }
+
+        val staleIds = scheduledCache.keys.filter { it !in desired.keys }
+        val prefsEditor = diffPrefs.edit()
+        var changed = false
+
+        for (staleId in staleIds) {
+            cancelInstance(staleId)
+            scheduledCache.remove(staleId)
+            prefsEditor.remove(staleId)
+            changed = true
+        }
+
+        for ((remId, pair) in desired) {
+            val (inst, targetMs) = pair
+            val previousMs = scheduledCache[remId]
+            if (forceAll || previousMs == null || kotlin.math.abs(previousMs - targetMs) > 500L) {
+                scheduleInstance(inst, overrideTriggerEpochMs = targetMs)
+                scheduledCache[remId] = targetMs
+                prefsEditor.putLong(remId, targetMs)
+                changed = true
+            }
+        }
+
+        if (changed) {
+            prefsEditor.apply()
+        }
+    }
+
+    private fun ensureCacheLoaded() {
+        if (cacheInitialized) return
+        synchronized(scheduledCache) {
+            if (!cacheInitialized) {
+                for ((k, v) in diffPrefs.all) {
+                    if (v is Long) {
+                        scheduledCache[k] = v
+                    }
+                }
+                cacheInitialized = true
+            }
+        }
     }
 
     fun scheduleInstance(instance: ScheduledReminderInstance, overrideTriggerEpochMs: Long? = null) {
@@ -75,6 +147,8 @@ class ReminderScheduler(private val context: Context) {
         )
 
         val safeTriggerMs = triggerEpochMs.coerceAtLeast(System.currentTimeMillis() + 1000L)
+        scheduledCache[reminderId] = safeTriggerMs
+        diffPrefs.edit().putLong(reminderId, safeTriggerMs).apply()
 
         try {
             if (canScheduleExact()) {
@@ -145,6 +219,11 @@ class ReminderScheduler(private val context: Context) {
     }
 
     companion object {
+        private const val DIFF_PREFS_NAME = "tick_alarm_diff_registry"
+        private val scheduledCache = ConcurrentHashMap<String, Long>()
+        @Volatile
+        private var cacheInitialized = false
+
         const val ACTION_FIRE_REMINDER = "com.ticktxt.app.ACTION_FIRE_REMINDER"
         const val ACTION_SNOOZE_REMINDER = "com.ticktxt.app.ACTION_SNOOZE_REMINDER"
         const val ACTION_DISMISS_REMINDER = "com.ticktxt.app.ACTION_DISMISS_REMINDER"

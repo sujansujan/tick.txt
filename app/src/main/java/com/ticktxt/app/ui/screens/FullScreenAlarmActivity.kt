@@ -1,6 +1,5 @@
 package com.ticktxt.app.ui.screens
 
-import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.media.Ringtone
@@ -17,15 +16,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -41,7 +40,9 @@ import com.ticktxt.app.core.storage.TickStorageRepository
 import com.ticktxt.app.ui.theme.LocalTickFontFamily
 import com.ticktxt.app.ui.theme.LocalTickPalette
 import com.ticktxt.app.ui.theme.TickTxtTheme
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -49,6 +50,10 @@ import java.time.LocalTime
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.abs
+
+// Optimization #5: Pre-allocated 240-char border string so recompositions never allocate strings
+private val DASH_FILL_240 = "-".repeat(240)
 
 /**
  * Uniform ASCII Design System Primitives (`+--[Title]---+`, `+---...---+`, `| ... |`).
@@ -60,6 +65,9 @@ fun AsciiHorizontalBorder(
     fillChar: Char = '-',
     color: Color = LocalTickPalette.current.fgMuted
 ) {
+    val fillText = remember(fillChar) {
+        if (fillChar == '-') DASH_FILL_240 else fillChar.toString().repeat(240)
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
@@ -74,7 +82,7 @@ fun AsciiHorizontalBorder(
             maxLines = 1
         )
         Text(
-            text = fillChar.toString().repeat(240),
+            text = fillText,
             color = color,
             fontSize = 12.sp,
             lineHeight = 14.sp,
@@ -138,7 +146,7 @@ fun AsciiTitledTopBorder(
             maxLines = 1
         )
         Text(
-            text = "-".repeat(240),
+            text = DASH_FILL_240,
             color = borderColor,
             fontSize = 12.sp,
             lineHeight = 14.sp,
@@ -476,12 +484,8 @@ object PlainTextSportsAscii {
 
 /**
  * Screenshot-1 Style Interactive 3-Column ASCII Wheel / Drum Snooze & Reminder Picker Popup!
- * Features:
- * - Touch-drag vertical scrolling (`detectVerticalDragGestures`) AND tap-to-step on all 3 wheel columns
- * - Mode switcher inside header: `[Cal]` (Date | Hour | Minute wheel) vs `[+Offset]` (Amount | Unit sec/min/hr/day/wk/mo | Quick)
- * - Anchor toggle: `[*Now*]` vs `Reminder time`
- * - Quick time presets (`[08:00]  [12:00]  [16:00]  [20:00]`) & 1-tap default snooze (`[zZ +10m]`)
- * - Uniform bottom actions: `[X Close]` and `[zZ Snooze]`
+ * Includes Optimization #6: Fling / Momentum Physics (`VelocityTracker` + decay coroutine)
+ * so flicking any wheel column glides smoothly with haptic feedback.
  */
 @Composable
 fun AsciiSnoozeWheelPopup(
@@ -494,6 +498,8 @@ fun AsciiSnoozeWheelPopup(
     onConfirmDateTime: (LocalDate, LocalTime, Long) -> Unit
 ) {
     val palette = LocalTickPalette.current
+    val haptics = LocalHapticFeedback.current
+    val coroutineScope = rememberCoroutineScope()
     val monoFont = FontFamily.Monospace
     val nowDt = remember { LocalDateTime.now().withSecond(0).withNano(0) }
 
@@ -518,10 +524,42 @@ fun AsciiSnoozeWheelPopup(
     var offsetUnitIdx by remember { mutableStateOf(1) } // 0=sec, 1=min, 2=hr, 3=day, 4=wk, 5=mo
     val allUnits = SnoozeUnit.entries
 
-    // Vertical drag accumulators for tactile wheel rolling
+    // Vertical drag accumulators & fling jobs for tactile momentum wheel rolling
     var dragAccumCol1 by remember { mutableStateOf(0f) }
     var dragAccumCol2 by remember { mutableStateOf(0f) }
     var dragAccumCol3 by remember { mutableStateOf(0f) }
+    var flingJobCol1 by remember { mutableStateOf<Job?>(null) }
+    var flingJobCol2 by remember { mutableStateOf<Job?>(null) }
+    var flingJobCol3 by remember { mutableStateOf<Job?>(null) }
+
+    fun stepCol1(delta: Int) {
+        if (wheelMode == "cal") selectedDate = selectedDate.plusDays(delta.toLong())
+        else offsetAmount = (offsetAmount + delta).coerceIn(1, 120)
+        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+    }
+
+    fun stepCol2(delta: Int) {
+        if (wheelMode == "cal") selectedHour = (selectedHour + delta + 24) % 24
+        else offsetUnitIdx = (offsetUnitIdx + delta + allUnits.size) % allUnits.size
+        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+    }
+
+    fun stepCol3(delta: Int) {
+        if (wheelMode == "cal") selectedMinute = (selectedMinute + delta * 5 + 60) % 60
+        else offsetAmount = (offsetAmount + delta * 5).coerceIn(1, 120)
+        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+    }
+
+    fun launchMomentumFling(initialVelocityY: Float, onStep: (Int) -> Unit): Job {
+        return coroutineScope.launch {
+            var v = initialVelocityY.coerceIn(-4500f, 4500f)
+            while (abs(v) > 280f) {
+                onStep(if (v < 0f) 1 else -1)
+                v *= 0.72f
+                delay(36L)
+            }
+        }
+    }
 
     val targetDateTime = remember(wheelMode, selectedDate, selectedHour, selectedMinute, offsetAmount, offsetUnitIdx, anchorToNow) {
         if (wheelMode == "cal") {
@@ -611,7 +649,7 @@ fun AsciiSnoozeWheelPopup(
                 fontSizeSp = fontSizeSp
             )
 
-            // 3. Mode Switcher Bar (matching Screenshot 1's `[32 d.   [+10m] [Cal] [Offset]]` bar!)
+            // 3. Mode Switcher Bar (`[32 d.   [zZ +10m] [*Cal Wheel*] [+Offset]]`)
             AsciiBoxActionRow(
                 actions = listOf(
                     Triple(deltaLabel, palette.reminder) {},
@@ -632,7 +670,7 @@ fun AsciiSnoozeWheelPopup(
             )
             AsciiHorizontalBorder(corner = "|")
 
-            // 4. 3-Column Interactive ASCII Drum / Wheel Picker (Drag vertically OR tap rows!)
+            // 4. 3-Column Interactive ASCII Drum / Wheel Picker (Drag, Flick with Momentum, or Tap!)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -649,18 +687,29 @@ fun AsciiSnoozeWheelPopup(
                     modifier = Modifier
                         .weight(1.5f)
                         .pointerInput(wheelMode) {
-                            detectVerticalDragGestures { _, dragAmount ->
+                            val velocityTracker = VelocityTracker()
+                            detectVerticalDragGestures(
+                                onDragStart = {
+                                    flingJobCol1?.cancel()
+                                    velocityTracker.resetTracking()
+                                },
+                                onDragEnd = {
+                                    val vy = velocityTracker.calculateVelocity().y
+                                    if (abs(vy) > 300f) {
+                                        flingJobCol1 = launchMomentumFling(vy, ::stepCol1)
+                                    }
+                                }
+                            ) { change, dragAmount ->
+                                velocityTracker.addPosition(change.uptimeMillis, change.position)
                                 dragAccumCol1 += dragAmount
-                                val stepThreshold = 28f
+                                val stepThreshold = 26f
                                 while (dragAccumCol1 <= -stepThreshold) {
                                     dragAccumCol1 += stepThreshold
-                                    if (wheelMode == "cal") selectedDate = selectedDate.plusDays(1)
-                                    else offsetAmount = (offsetAmount + 1).coerceAtMost(120)
+                                    stepCol1(1)
                                 }
                                 while (dragAccumCol1 >= stepThreshold) {
                                     dragAccumCol1 -= stepThreshold
-                                    if (wheelMode == "cal") selectedDate = selectedDate.minusDays(1)
-                                    else offsetAmount = (offsetAmount - 1).coerceAtLeast(1)
+                                    stepCol1(-1)
                                 }
                             }
                         },
@@ -694,8 +743,8 @@ fun AsciiSnoozeWheelPopup(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    if (wheelMode == "cal") selectedDate = selectedDate.plusDays(off.toLong())
-                                    else offsetAmount = (((offsetAmount + off - 1 + 120) % 120) + 1)
+                                    flingJobCol1?.cancel()
+                                    if (off != 0) stepCol1(off)
                                 }
                                 .padding(vertical = 3.dp)
                         )
@@ -707,18 +756,29 @@ fun AsciiSnoozeWheelPopup(
                     modifier = Modifier
                         .weight(1.0f)
                         .pointerInput(wheelMode) {
-                            detectVerticalDragGestures { _, dragAmount ->
+                            val velocityTracker = VelocityTracker()
+                            detectVerticalDragGestures(
+                                onDragStart = {
+                                    flingJobCol2?.cancel()
+                                    velocityTracker.resetTracking()
+                                },
+                                onDragEnd = {
+                                    val vy = velocityTracker.calculateVelocity().y
+                                    if (abs(vy) > 300f) {
+                                        flingJobCol2 = launchMomentumFling(vy, ::stepCol2)
+                                    }
+                                }
+                            ) { change, dragAmount ->
+                                velocityTracker.addPosition(change.uptimeMillis, change.position)
                                 dragAccumCol2 += dragAmount
-                                val stepThreshold = 28f
+                                val stepThreshold = 26f
                                 while (dragAccumCol2 <= -stepThreshold) {
                                     dragAccumCol2 += stepThreshold
-                                    if (wheelMode == "cal") selectedHour = (selectedHour + 1) % 24
-                                    else offsetUnitIdx = (offsetUnitIdx + 1) % allUnits.size
+                                    stepCol2(1)
                                 }
                                 while (dragAccumCol2 >= stepThreshold) {
                                     dragAccumCol2 -= stepThreshold
-                                    if (wheelMode == "cal") selectedHour = (selectedHour - 1 + 24) % 24
-                                    else offsetUnitIdx = (offsetUnitIdx - 1 + allUnits.size) % allUnits.size
+                                    stepCol2(-1)
                                 }
                             }
                         },
@@ -751,8 +811,8 @@ fun AsciiSnoozeWheelPopup(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    if (wheelMode == "cal") selectedHour = (selectedHour + off + 24) % 24
-                                    else offsetUnitIdx = (offsetUnitIdx + off + allUnits.size * 2) % allUnits.size
+                                    flingJobCol2?.cancel()
+                                    if (off != 0) stepCol2(off)
                                 }
                                 .padding(vertical = 3.dp)
                         )
@@ -764,18 +824,29 @@ fun AsciiSnoozeWheelPopup(
                     modifier = Modifier
                         .weight(1.0f)
                         .pointerInput(wheelMode) {
-                            detectVerticalDragGestures { _, dragAmount ->
+                            val velocityTracker = VelocityTracker()
+                            detectVerticalDragGestures(
+                                onDragStart = {
+                                    flingJobCol3?.cancel()
+                                    velocityTracker.resetTracking()
+                                },
+                                onDragEnd = {
+                                    val vy = velocityTracker.calculateVelocity().y
+                                    if (abs(vy) > 300f) {
+                                        flingJobCol3 = launchMomentumFling(vy, ::stepCol3)
+                                    }
+                                }
+                            ) { change, dragAmount ->
+                                velocityTracker.addPosition(change.uptimeMillis, change.position)
                                 dragAccumCol3 += dragAmount
-                                val stepThreshold = 28f
+                                val stepThreshold = 26f
                                 while (dragAccumCol3 <= -stepThreshold) {
                                     dragAccumCol3 += stepThreshold
-                                    if (wheelMode == "cal") selectedMinute = (selectedMinute + 5) % 60
-                                    else offsetAmount = (offsetAmount + 5).coerceAtMost(120)
+                                    stepCol3(1)
                                 }
                                 while (dragAccumCol3 >= stepThreshold) {
                                     dragAccumCol3 -= stepThreshold
-                                    if (wheelMode == "cal") selectedMinute = (selectedMinute - 5 + 60) % 60
-                                    else offsetAmount = (offsetAmount - 5).coerceAtLeast(1)
+                                    stepCol3(-1)
                                 }
                             }
                         },
@@ -810,11 +881,13 @@ fun AsciiSnoozeWheelPopup(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
+                                    flingJobCol3?.cancel()
                                     if (wheelMode == "cal") {
-                                        selectedMinute = (selectedMinute + off * 5 + 60) % 60
+                                        if (off != 0) stepCol3(off)
                                     } else {
                                         val qList = curUnit.quickValues
                                         offsetAmount = qList[(off + 2 + qList.size) % qList.size]
+                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                     }
                                 }
                                 .padding(vertical = 3.dp)
@@ -878,11 +951,10 @@ object AlarmAudioController {
     private var notifRingtone: Ringtone? = null
     private var vibrator: Vibrator? = null
 
-    fun applyAudioMode(context: Context, isAlarmMuted: Boolean, notifId: Int? = null) {
-        if (isAlarmMuted) {
-            stopLoudAlarmOnly()
+    fun triggerAlertAudio(context: Context, isNotificationMode: Boolean) {
+        if (isNotificationMode) {
+            playSystemNotificationBeepOnce(context)
         } else {
-            stopNotificationSound(context, notifId)
             startLoudAlarm(context)
         }
     }
@@ -920,16 +992,6 @@ object AlarmAudioController {
                     @Suppress("DEPRECATION")
                     vib.vibrate(pattern, 0)
                 }
-            }
-        }
-    }
-
-    private fun stopNotificationSound(context: Context, notifId: Int?) {
-        runCatching { notifRingtone?.stop() }
-        if (notifId != null) {
-            runCatching {
-                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                nm.cancel(notifId)
             }
         }
     }
@@ -974,11 +1036,10 @@ class FullScreenAlarmActivity : ComponentActivity() {
             ?: intent.getStringExtra("extra_task_title") ?: "scheduled task"
         val rawSpec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC)
             ?: intent.getStringExtra("extra_raw_spec") ?: "0m/a"
-        val remType = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_TYPE) ?: "a"
-        val notifId = intent.getIntExtra("extra_notif_id", (reminderId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100))
-        val initialMuted = intent.getBooleanExtra("extra_alarm_muted", settings.alarmMutedByDefault)
+        val remType = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_TYPE)
+            ?: if (rawSpec.endsWith("/n")) "n" else "a"
 
-        AlarmAudioController.applyAudioMode(this, initialMuted, notifId)
+        AlarmAudioController.triggerAlertAudio(this, isNotificationMode = (remType == "n"))
 
         setContent {
             TickTxtTheme(
@@ -989,14 +1050,6 @@ class FullScreenAlarmActivity : ComponentActivity() {
                     taskTitle = taskTitle,
                     rawSpec = rawSpec,
                     fontSizeSp = settings.fontSizeSp,
-                    initialAlarmMuted = initialMuted,
-                    onToggleAlarmMute = { mutedNow ->
-                        if (mutedNow) {
-                            AlarmAudioController.playSystemNotificationBeepOnce(this)
-                        } else {
-                            AlarmAudioController.applyAudioMode(this, isAlarmMuted = false, notifId = notifId)
-                        }
-                    },
                     onSnoozeWithPreset = { presetSpec ->
                         AlarmAudioController.stopAll()
                         val snoozeIntent = Intent(this, AlarmBroadcastReceiver::class.java).apply {
@@ -1009,7 +1062,6 @@ class FullScreenAlarmActivity : ComponentActivity() {
                             putExtra(ReminderScheduler.EXTRA_SNOOZE_PRESET, presetSpec)
                         }
                         sendBroadcast(snoozeIntent)
-                        cancelNotification(notifId)
                         finish()
                     },
                     onDismiss = {
@@ -1022,7 +1074,6 @@ class FullScreenAlarmActivity : ComponentActivity() {
                             putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
                         }
                         sendBroadcast(dismissIntent)
-                        cancelNotification(notifId)
                         finish()
                     },
                     onMarkDone = {
@@ -1035,18 +1086,10 @@ class FullScreenAlarmActivity : ComponentActivity() {
                             putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
                         }
                         sendBroadcast(doneIntent)
-                        cancelNotification(notifId)
                         finish()
                     }
                 )
             }
-        }
-    }
-
-    private fun cancelNotification(notifId: Int) {
-        runCatching {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.cancel(notifId)
         }
     }
 
@@ -1067,8 +1110,6 @@ fun AsciiFullScreenAlarmSurface(
     taskTitle: String,
     rawSpec: String,
     fontSizeSp: Int = 15,
-    initialAlarmMuted: Boolean = true,
-    onToggleAlarmMute: (Boolean) -> Unit = {},
     onSnoozeWithPreset: (String) -> Unit,
     onDismiss: () -> Unit,
     onMarkDone: () -> Unit

@@ -19,7 +19,7 @@ import java.io.File
 
 /**
  * Compact Settings screen with all options strictly inside the full-width ASCII boxes,
- * plus 1-tap overlay permission so alarms and notifications always pop up in front of other apps.
+ * using the canonical action token vocabulary (`[✓ Archive]`, `[# GCal]`, `[! Test Alert]`, `[! Overlay]`).
  */
 @Composable
 fun SettingsScreen(
@@ -124,7 +124,7 @@ fun SettingsScreen(
             )
             AsciiBoxActionRow(
                 actions = listOf(
-                    Triple("[!] Pop-Up Over Apps", palette.project) {
+                    Triple("[! Overlay]", palette.project) {
                         runCatching {
                             context.startActivity(
                                 Intent(
@@ -134,7 +134,7 @@ fun SettingsScreen(
                             )
                         }
                     },
-                    Triple("[> Test Full Screen]", palette.priorityA) {
+                    Triple("[! Test Alert]", palette.priorityA) {
                         onFireImmediateNotification()
                     }
                 ),
@@ -159,7 +159,7 @@ fun SettingsScreen(
                     ) {
                         onUpdateSettings(settings.copy(autoSyncGoogleCalendar = !settings.autoSyncGoogleCalendar))
                     },
-                    Triple("[# Sync All Tasks >]", palette.contextTag) {
+                    Triple("[# GCal Sync]", palette.contextTag) {
                         onSyncAllToGoogleCalendar()
                     }
                 ),
@@ -184,7 +184,7 @@ fun SettingsScreen(
                 actions = listOf(
                     Triple("[/ Folder]", palette.project) { onPickFolderWithSaf() },
                     Triple("[> Share]", palette.fg) { onOpenSavedFileLocation() },
-                    Triple("[x Archive]", palette.fgMuted) { onArchiveCompletedTasks() }
+                    Triple("[✓ Archive]", palette.reminder) { onArchiveCompletedTasks() }
                 ),
                 fontSizeSp = (baseSp - 1).coerceAtLeast(12)
             )

@@ -12,7 +12,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -56,7 +55,6 @@ import com.ticktxt.app.core.nlp.SmartAddParser
 import com.ticktxt.app.core.notes.NotesRepository
 import com.ticktxt.app.core.reminders.ReminderScheduleCalculator
 import com.ticktxt.app.core.reminders.ReminderScheduler
-import com.ticktxt.app.core.reminders.SnoozeUnit
 import com.ticktxt.app.core.storage.PersistedSettings
 import com.ticktxt.app.core.storage.TickStorageRepository
 import com.ticktxt.app.core.todotxt.TodoParser
@@ -67,8 +65,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 data class ActiveAlarmPayload(
     val reminderId: String,
@@ -79,14 +79,13 @@ data class ActiveAlarmPayload(
 )
 
 /**
- * Main screen implementing:
- * - Per-todo option for `Alarm` (`/a`) vs `Notification` (`/n`), both launching Full-Screen in front
- * - Clean 3-line ASCII task cards (click `[ ]` on left for Done, click task for Popup)
- * - Swipe Right on task = Done (`[✓]`), Swipe Left on task = Delete (`[X]`)
- * - Horizontal swipe between tabs (`HorizontalPager`: Tasks <-> Notes <-> Settings)
- * - Multi-step Back gesture: Popup -> Previous Place -> Todo (`Tasks`) Tab -> Close App
- * - Floating ASCII `[+ Add]` button at bottom-right of Todo tab just above bottom tabs
- * - Google Calendar (`[# GCal]`) button inside the Task Click Popup.
+ * Main screen following a strict, uniform ASCII UX Design System:
+ * - Zero CSS/Compose `.border()` rectangles anywhere (even the floating `[+ Add]` button uses pure `+---+` / `|   |` ASCII borders)
+ * - Uniform canonical action tokens everywhere (`[+ Add]`, `[✓ Done]`, `[zZ Snooze]`, `[✓ Save]`, `[# GCal]`, `[X Delete]`, `[X Close]`)
+ * - Screenshot-1 style "EDIT REMINDER" popup + 3-Column ASCII Wheel Snooze Picker (`AsciiSnoozeWheelPopup`) with touch-drag & Offset/Calendar modes
+ * - Smart Priority `(A)->(B)->(C)` & Due-Date sorting + 1-tap Priority selector `(A)/(B)/(C)` in popups
+ * - 3-line task cards with live auto-refreshing relative countdown badges (`15 m.`, `2 d.`, `-5 m.`), Swipe Right = Done, Swipe Left = Delete
+ * - HorizontalPager tab swiping + multi-step Back gesture navigation.
  */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -126,9 +125,6 @@ fun MainScreen(
     var activeFilter by remember { mutableStateOf("open") }
 
     // Navigation history for Back Gesture:
-    // 1st Back -> returns to previousPlace (page, filter)
-    // 2nd Back -> goes to Todo tab (page 0, filter "open")
-    // 3rd Back -> closes the app
     var lastCommittedPage by remember { mutableStateOf(0) }
     var previousPlace by remember { mutableStateOf<Pair<Int, String>?>(null) }
 
@@ -150,15 +146,14 @@ fun MainScreen(
     var editingTask by remember { mutableStateOf<TodoTask?>(null) }
     var editingTaskDraft by remember { mutableStateOf("") }
     var editTaskAlertType by remember { mutableStateOf("a") } // "a" = Alarm, "n" = Notification
-    var editSnoozeUnit by remember { mutableStateOf(SnoozeUnit.MINUTES) }
-    var editSnoozeAmount by remember { mutableStateOf(5) }
+    var showEditSnoozeWheel by remember { mutableStateOf(false) }
 
     var showAddTaskPopup by remember { mutableStateOf(false) }
     var smartInput by remember { mutableStateOf("") }
     var addTaskAlertType by remember { mutableStateOf("a") } // "a" = Alarm, "n" = Notification
+    var addTaskPriority by remember { mutableStateOf<Char?>(null) }
     var disabledSpans by remember { mutableStateOf(setOf<String>()) }
-    var pickerUnit by remember { mutableStateOf(SnoozeUnit.MINUTES) }
-    var pickerAmount by remember { mutableStateOf(5) }
+    var showAddSnoozeWheel by remember { mutableStateOf(false) }
 
     var showTagsPopup by remember { mutableStateOf(false) }
 
@@ -166,6 +161,15 @@ fun MainScreen(
 
     var undoSnapshot by remember { mutableStateOf<List<TodoTask>?>(null) }
     var statusBanner by remember { mutableStateOf<String?>(null) }
+
+    // Live-ticking clock so relative countdown badges (`15 m.`, `2 h.`, `-5 m.`) stay accurate automatically
+    var currentNow by remember { mutableStateOf(LocalDateTime.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(15_000L)
+            currentNow = LocalDateTime.now()
+        }
+    }
 
     LaunchedEffect(statusBanner) {
         if (statusBanner != null) {
@@ -185,7 +189,7 @@ fun MainScreen(
             val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
             tasks = syncedList
             storageRepo.saveTasks(syncedList)
-            statusBanner = "[#] Synced $count task(s)"
+            statusBanner = "[# GCal] Synced $count task(s)"
         } else {
             statusBanner = "[!] Calendar permission needed"
         }
@@ -287,6 +291,7 @@ fun MainScreen(
             } else if (event == Lifecycle.Event.ON_RESUME) {
                 tasks = storageRepo.loadTasks()
                 notes = storageRepo.loadNotes()
+                currentNow = LocalDateTime.now()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -326,12 +331,14 @@ fun MainScreen(
     }
 
     // Back gesture state machine:
-    // 1. Closes any active popup / editor (returns to previous place)
+    // 1. Closes any open wheel / popup / editor
     // 2. Returns to previousPlace (tab/filter) if set
     // 3. Goes to Todo tab (page 0, "open") if not already there
     // 4. Closes the app
     BackHandler(enabled = true) {
         when {
+            showEditSnoozeWheel -> showEditSnoozeWheel = false
+            showAddSnoozeWheel -> showAddSnoozeWheel = false
             activeAlarmOverlay != null -> {
                 AlarmAudioController.stopAll()
                 activeAlarmOverlay = null
@@ -379,8 +386,7 @@ fun MainScreen(
         }
     }
 
-    val currentNow = LocalDateTime.now()
-    val parsePreview = remember(smartInput, disabledSpans, activeRules) {
+    val parsePreview = remember(smartInput, disabledSpans, activeRules, currentNow) {
         if (smartInput.isBlank()) null
         else SmartAddParser.parse(smartInput, currentNow, activeRules, disabledSpans)
     }
@@ -393,6 +399,7 @@ fun MainScreen(
             notes = storageRepo.saveNote(fn, "# ${res.strippedTitle}\n")
             selectedNoteName = fn
             smartInput = ""
+            addTaskPriority = null
             disabledSpans = emptySet()
             showAddTaskPopup = false
             focusManager.clearFocus()
@@ -401,6 +408,9 @@ fun MainScreen(
         } else {
             undoSnapshot = tasks
             var newTask = TodoParser.parseLine(res.formattedTodoLine, tasks.size + 1)
+            if (addTaskPriority != null && newTask.priority == null) {
+                newTask = newTask.copy(priority = addTaskPriority, isDirty = true)
+            }
             val chosenSpec = "0m/$addTaskAlertType"
             if (newTask.dueDate != null || newTask.reminderSpecs.isNotEmpty() || res.exactOffsetMillis != null) {
                 newTask = TodoParser.withReplacedMultiTag(newTask, "rem", listOf(chosenSpec))
@@ -413,6 +423,7 @@ fun MainScreen(
                 syncLastToCalendar = true
             )
             smartInput = ""
+            addTaskPriority = null
             disabledSpans = emptySet()
             showAddTaskPopup = false
             focusManager.clearFocus()
@@ -424,6 +435,7 @@ fun MainScreen(
     val dynamicProjects = remember(tasks) { tasks.flatMap { it.projects }.distinct().map { "+$it" } }
     val dynamicContexts = remember(tasks) { tasks.flatMap { it.contexts }.distinct().map { "@$it" } }
 
+    // Smart sorting: Incomplete first -> Priority (A)->(B)->(C) -> Earliest dueDate & dueTime -> lineNumber
     val filteredTasks = remember(tasks, activeFilter) {
         tasks.filter { task ->
             if (task.isBlankOrComment) return@filter false
@@ -435,11 +447,17 @@ fun MainScreen(
                 activeFilter.startsWith("@") -> task.contexts.contains(activeFilter.drop(1))
                 else -> true
             }
-        }
+        }.sortedWith(
+            compareBy<TodoTask> { it.isCompleted }
+                .thenBy { it.priority ?: '[' }
+                .thenBy { it.dueDate ?: LocalDate.MAX }
+                .thenBy { it.dueTime ?: LocalTime.MAX }
+                .thenBy { it.lineNumber }
+        )
     }
 
     // =========================================================================
-    // FULL-SCREEN ASCII ALARM / NOTIFICATION OVERLAY
+    // FULL-SCREEN 3-OPTION NOTIFICATION / ALARM OVERLAY
     // =========================================================================
     if (activeAlarmOverlay != null) {
         val alarm = activeAlarmOverlay!!
@@ -481,13 +499,13 @@ fun MainScreen(
                         }
                     }
                 }
-                val fmtTime = targetZdt.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-                statusBanner = "[zZ] +$presetSpec ($fmtTime)"
+                val fmtTime = targetZdt.format(DateTimeFormatter.ofPattern("HH:mm"))
+                statusBanner = "[zZ Snooze] Until $fmtTime"
                 activeAlarmOverlay = null
             },
             onDismiss = {
                 AlarmAudioController.stopAll()
-                statusBanner = "[X] Dismissed"
+                statusBanner = "[X Dismiss] Closed alert"
                 activeAlarmOverlay = null
             },
             onMarkDone = {
@@ -501,7 +519,7 @@ fun MainScreen(
                     }
                 }
                 persistAndSchedule(nextList)
-                statusBanner = "[✓] ${alarm.taskTitle}"
+                statusBanner = "[✓ Done] ${alarm.taskTitle}"
                 activeAlarmOverlay = null
             }
         )
@@ -596,11 +614,11 @@ fun MainScreen(
                                 }
                                 AsciiHorizontalBorder()
 
-                                // Status / Undo Row (if active)
+                                // Status / Undo Row
                                 if (statusBanner != null) {
                                     AsciiBoxLeftRightRow(
                                         left = statusBanner ?: "",
-                                        right = if (undoSnapshot != null) "[Undo]" else "[X]",
+                                        right = if (undoSnapshot != null) "[↺ Undo]" else "[X Close]",
                                         leftColor = palette.reminder,
                                         rightColor = palette.project,
                                         fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12),
@@ -618,12 +636,12 @@ fun MainScreen(
 
                                 Spacer(modifier = Modifier.height(4.dp))
 
-                                // 2. Dense 3-Line Task Cards List with Swipe Left = Delete, Swipe Right = Done
+                                // 2. Dense 3-Line Task Cards List with Swipe Right = Done, Swipe Left = Delete
                                 LazyColumn(
                                     modifier = Modifier
                                         .weight(1f)
                                         .fillMaxWidth(),
-                                    contentPadding = PaddingValues(bottom = 52.dp),
+                                    contentPadding = PaddingValues(bottom = 58.dp),
                                     verticalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     if (filteredTasks.isEmpty()) {
@@ -652,7 +670,6 @@ fun MainScreen(
                                                 confirmValueChange = { targetValue ->
                                                     when (targetValue) {
                                                         SwipeToDismissBoxValue.StartToEnd -> {
-                                                            // Swipe Right -> Toggle Done
                                                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                                             undoSnapshot = tasks
                                                             val updated = if (task.isCompleted) {
@@ -666,15 +683,14 @@ fun MainScreen(
                                                                 updated.second?.copy(lineNumber = tasks.size + 1)
                                                             )
                                                             persistAndSchedule(nextList)
-                                                            statusBanner = if (task.isCompleted) "[↺] Reopened" else "[✓] Completed"
+                                                            statusBanner = if (task.isCompleted) "[↺ Reopen] ${task.description}" else "[✓ Done] ${task.description}"
                                                             false
                                                         }
                                                         SwipeToDismissBoxValue.EndToStart -> {
-                                                            // Swipe Left -> Delete Task
                                                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                                             undoSnapshot = tasks
                                                             persistAndSchedule(tasks.filterNot { it.lineNumber == task.lineNumber })
-                                                            statusBanner = "[X] Deleted: ${task.description}"
+                                                            statusBanner = "[X Delete] ${task.description}"
                                                             true
                                                         }
                                                         SwipeToDismissBoxValue.Settled -> false
@@ -687,8 +703,8 @@ fun MainScreen(
                                                 backgroundContent = {
                                                     val dir = dismissState.dismissDirection
                                                     val bgText = when (dir) {
-                                                        SwipeToDismissBoxValue.StartToEnd -> "| [✓] DONE >>>"
-                                                        SwipeToDismissBoxValue.EndToStart -> "<<< [X] DELETE |"
+                                                        SwipeToDismissBoxValue.StartToEnd -> "| [✓ Done] >>>"
+                                                        SwipeToDismissBoxValue.EndToStart -> "<<< [X Delete] |"
                                                         else -> ""
                                                     }
                                                     val bgColor = when (dir) {
@@ -719,6 +735,7 @@ fun MainScreen(
                                                 content = {
                                                     UsableTaskCard(
                                                         task = task,
+                                                        currentNow = currentNow,
                                                         fontSizeSp = fontScaleSp,
                                                         fontScaleSp = fontScaleSp,
                                                         onToggleDone = {
@@ -750,22 +767,35 @@ fun MainScreen(
                                 }
                             }
 
-                            // 3. [+ Add] Button at Bottom-Right of Todo Tab (Just above the bottom tabs)
-                            Box(
+                            // 3. Uniform Pure-ASCII `[+ Add]` Box at Bottom-Right (No CSS green border!)
+                            Column(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
-                                    .padding(end = 14.dp, bottom = 6.dp)
+                                    .padding(end = 12.dp, bottom = 6.dp)
                                     .background(palette.bgElevated)
-                                    .border(1.dp, palette.reminder)
-                                    .clickable { showAddTaskPopup = true }
-                                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                                contentAlignment = Alignment.Center
+                                    .clickable { showAddTaskPopup = true },
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Text(
-                                    text = "[+ Add]",
+                                    text = "+---------+",
+                                    color = palette.fgMuted,
+                                    fontSize = 12.sp,
+                                    lineHeight = 13.sp,
+                                    fontFamily = monoFont
+                                )
+                                Text(
+                                    text = "| [+ Add] |",
                                     color = palette.reminder,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = fontScaleSp.sp,
+                                    fontSize = 12.sp,
+                                    lineHeight = 14.sp,
+                                    fontFamily = monoFont
+                                )
+                                Text(
+                                    text = "+---------+",
+                                    color = palette.fgMuted,
+                                    fontSize = 12.sp,
+                                    lineHeight = 13.sp,
                                     fontFamily = monoFont
                                 )
                             }
@@ -773,7 +803,7 @@ fun MainScreen(
                     }
 
                     1 -> {
-                        // TAB 1: NOTES
+                        // TAB 1: NOTES (Uses the exact same `[+ Add]`, `[✓ Save]`, `[X Delete]` vocabulary!)
                         val currentNote = notes.firstOrNull { it.filename == selectedNoteName } ?: notes.firstOrNull()
                         Column(
                             modifier = Modifier
@@ -783,7 +813,7 @@ fun MainScreen(
                             AsciiTitledTopBorder(
                                 badgeText = "/ NOTES",
                                 badgeColor = palette.project,
-                                rightBadgeText = "+ New",
+                                rightBadgeText = "+ Add",
                                 rightBadgeColor = palette.reminder,
                                 onRightBadgeClick = {
                                     val name = "note-${notes.size + 1}.md"
@@ -827,9 +857,20 @@ fun MainScreen(
                                             }
                                         }
                                     )
+                                    add(
+                                        Triple("[+ Add]", palette.reminder) {
+                                            val name = "note-${notes.size + 1}.md"
+                                            val initialBody = "# $name\n\n"
+                                            notes = storageRepo.saveNote(name, initialBody)
+                                            selectedNoteName = name
+                                            noteDraftName = name
+                                            noteDraftText = initialBody
+                                            noteEditMode = true
+                                        }
+                                    )
                                     if (notes.size > 1) {
                                         add(
-                                            Triple("[X Del]", palette.priorityA) {
+                                            Triple("[X Delete]", palette.priorityA) {
                                                 val updated = storageRepo.deleteNote(currentNote.filename)
                                                 notes = updated
                                                 selectedNoteName = updated.firstOrNull()?.filename ?: ""
@@ -1031,13 +1072,13 @@ fun MainScreen(
         }
 
         // =====================================================================
-        // POPUP 1: PROJECTS (+) & CONTEXTS (@) FILTER MODAL (Shaded Background)
+        // POPUP 1: PROJECTS (+) & CONTEXTS (@) FILTER MODAL
         // =====================================================================
         if (showTagsPopup) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.76f))
+                    .background(Color.Black.copy(alpha = 0.78f))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
@@ -1103,7 +1144,7 @@ fun MainScreen(
                                 updateFilterWithHistory("open")
                                 showTagsPopup = false
                             },
-                            Triple("[X] Close", palette.fgMuted) {
+                            Triple("[X Close]", palette.fgMuted) {
                                 showTagsPopup = false
                             }
                         ),
@@ -1115,327 +1156,410 @@ fun MainScreen(
         }
 
         // =====================================================================
-        // POPUP 2: TASK CLICK MODAL (Per-Todo Alarm/Notif + Snooze + GCal + Edit)
+        // POPUP 2: SCREENSHOT-1 STYLE "EDIT REMINDER" POPUP + WHEEL SNOOZE
         // =====================================================================
         if (editingTask != null) {
             val target = editingTask!!
-            val isTargetGcalSynced = target.getTagValue("gcal") != null
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.76f))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { editingTask = null }
-                    .padding(horizontal = 14.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
+            val parsedDraft = remember(editingTaskDraft, target.lineNumber) {
+                TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+            }
+            val isTargetGcalSynced = parsedDraft.getTagValue("gcal") != null
+            val targetDt = remember(parsedDraft.dueDate, parsedDraft.dueTime, currentNow) {
+                val d = parsedDraft.dueDate ?: currentNow.toLocalDate()
+                val t = parsedDraft.dueTime ?: LocalTime.of(9, 0)
+                LocalDateTime.of(d, t)
+            }
+            val deltaStr = remember(targetDt, currentNow) {
+                PlainTextSportsAscii.formatRelativeDelta(currentNow, targetDt)
+            }
+            val formattedDateLine = remember(targetDt) {
+                targetDt.format(DateTimeFormatter.ofPattern("EEE, d MMM • HH:mm", Locale.ENGLISH))
+            }
+
+            if (showEditSnoozeWheel) {
+                AsciiSnoozeWheelPopup(
+                    taskTitle = parsedDraft.description.ifEmpty { target.description },
+                    initialDate = parsedDraft.dueDate,
+                    initialTime = parsedDraft.dueTime,
+                    fontSizeSp = fontScaleSp,
+                    confirmLabel = "[zZ Snooze]",
+                    onDismiss = { showEditSnoozeWheel = false },
+                    onConfirmDateTime = { chosenDate, chosenTime, delayMs ->
+                        val dStr = chosenDate.toString()
+                        val tStr = "%02d:%02d".format(chosenTime.hour, chosenTime.minute)
+                        val specStr = "0m/$editTaskAlertType"
+                        var updated = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+                        updated = TodoParser.withUpdatedTag(updated, "due", dStr)
+                        updated = TodoParser.withUpdatedTag(updated, "duetime", tStr)
+                        updated = TodoParser.withReplacedMultiTag(updated, "rem", listOf(specStr))
+                        editingTaskDraft = TodoParser.serializeLine(updated)
+
+                        undoSnapshot = tasks
+                        val updatedTasks = tasks.map { if (it.lineNumber == target.lineNumber) updated else it }
+                        tasks = updatedTasks
+                        storageRepo.saveTasks(updatedTasks)
+                        scheduleExactDelayAlarm(updated, delayMs, specStr)
+                        showEditSnoozeWheel = false
+                        editingTask = null
+                        statusBanner = "[zZ Snooze] $dStr $tStr"
+                    }
+                )
+            } else {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .background(palette.bg)
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.78f))
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) {}
-                        .padding(10.dp)
+                        ) { editingTask = null }
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    AsciiTitledTopBorder(
-                        badgeText = "/ TASK #${"%02d".format(target.lineNumber)}",
-                        badgeColor = palette.project,
-                        rightBadgeText = "X Close",
-                        rightBadgeColor = palette.fgMuted,
-                        onRightBadgeClick = { editingTask = null }
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(palette.bg)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {}
+                            .padding(10.dp)
                     ) {
-                        Text(
-                            text = "| > ",
-                            color = palette.project,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp,
-                            fontFamily = monoFont
+                        // Top Header matching Screenshot 1 ("EDIT REMINDER") + 1-tap +10m Quick Snooze
+                        AsciiTitledTopBorder(
+                            badgeText = "/ EDIT REMINDER",
+                            badgeColor = palette.reminder,
+                            rightBadgeText = "X Close",
+                            rightBadgeColor = palette.fgMuted,
+                            onRightBadgeClick = { editingTask = null }
                         )
-                        BasicTextField(
-                            value = editingTaskDraft,
-                            onValueChange = { editingTaskDraft = it },
-                            textStyle = TextStyle(fontFamily = monoFont, color = palette.fg, fontSize = fontScaleSp.sp),
-                            cursorBrush = SolidColor(palette.project),
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(vertical = 6.dp)
-                        )
-                        Text(
-                            text = " |",
-                            color = palette.fgMuted,
-                            fontSize = 12.sp,
-                            fontFamily = monoFont
-                        )
-                    }
-                    AsciiHorizontalBorder(corner = "|")
-                    // Per-todo option: Alarm (/a) vs Notification (/n)
-                    AsciiBoxOptionRow(
-                        label = "[!] Alert",
-                        options = listOf(
-                            "a" to "Alarm",
-                            "n" to "Notification"
-                        ),
-                        selectedValue = editTaskAlertType,
-                        onSelect = { newType ->
-                            editTaskAlertType = newType
-                            var parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
-                            val updatedRems = if (parsed.reminderSpecs.isEmpty()) {
-                                listOf("0m/$newType")
-                            } else {
-                                parsed.reminderSpecs.map { spec ->
-                                    val base = spec.substringBefore("/")
-                                    "$base/$newType"
-                                }
-                            }
-                            parsed = TodoParser.withReplacedMultiTag(parsed, "rem", updatedRems)
-                            editingTaskDraft = TodoParser.serializeLine(parsed)
-                        },
-                        activeColor = if (editTaskAlertType == "a") palette.priorityB else palette.reminder,
-                        fontSizeSp = fontScaleSp
-                    )
-                    AsciiBoxOptionRow(
-                        label = "[zZ] Unit",
-                        options = SnoozeUnit.entries.map { it to it.asciiLabel.lowercase() },
-                        selectedValue = editSnoozeUnit,
-                        onSelect = { u ->
-                            editSnoozeUnit = u
-                            if (editSnoozeAmount !in u.quickValues) {
-                                editSnoozeAmount = u.quickValues.first()
-                            }
-                        },
-                        activeColor = palette.project,
-                        fontSizeSp = fontScaleSp
-                    )
-                    AsciiBoxActionRow(
-                        actions = listOf(
-                            Triple("<-1>", palette.project) { editSnoozeAmount = (editSnoozeAmount - 1).coerceAtLeast(1) },
-                            Triple("$editSnoozeAmount ${editSnoozeUnit.asciiLabel.lowercase()}", palette.fg) {},
-                            Triple("<+1>", palette.project) { editSnoozeAmount = (editSnoozeAmount + 1).coerceAtMost(365) }
-                        ),
-                        fontSizeSp = fontScaleSp
-                    )
-                    AsciiBoxOptionRow(
-                        label = "[+] Step",
-                        options = editSnoozeUnit.quickValues.map { it to "+$it${editSnoozeUnit.code}" },
-                        selectedValue = editSnoozeAmount,
-                        onSelect = { editSnoozeAmount = it },
-                        activeColor = palette.priorityB,
-                        fontSizeSp = fontScaleSp
-                    )
-                    AsciiHorizontalBorder(corner = "|")
-                    AsciiBoxActionRow(
-                        actions = listOf(
-                            Triple("[zZ +$editSnoozeAmount${editSnoozeUnit.code}]", palette.reminder) {
-                                val zdt = ReminderScheduleCalculator.computeGranularSnoozeTarget(
-                                    ZonedDateTime.now(),
-                                    editSnoozeAmount.toDouble(),
-                                    editSnoozeUnit
-                                )
-                                val dStr = zdt.toLocalDate().toString()
-                                val tStr = "%02d:%02d".format(zdt.hour, zdt.minute)
-                                val specStr = "0m/$editTaskAlertType"
-                                var parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
-                                parsed = TodoParser.withUpdatedTag(parsed, "due", dStr)
-                                parsed = TodoParser.withUpdatedTag(parsed, "duetime", tStr)
-                                parsed = TodoParser.withReplacedMultiTag(parsed, "rem", listOf(specStr))
-                                editingTaskDraft = TodoParser.serializeLine(parsed)
 
-                                val delayMs = (zdt.toInstant().toEpochMilli() - System.currentTimeMillis()).coerceAtLeast(1_000L)
-                                undoSnapshot = tasks
-                                val updatedTasks = tasks.map { if (it.lineNumber == target.lineNumber) parsed else it }
-                                tasks = updatedTasks
-                                storageRepo.saveTasks(updatedTasks)
-                                scheduleExactDelayAlarm(parsed, delayMs, specStr)
-                                editingTask = null
-                                statusBanner = "[zZ] +$editSnoozeAmount${editSnoozeUnit.code}"
+                        // Row 1: Editable Task Title Box
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "| > ",
+                                color = palette.project,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                fontFamily = monoFont
+                            )
+                            BasicTextField(
+                                value = editingTaskDraft,
+                                onValueChange = { editingTaskDraft = it },
+                                textStyle = TextStyle(fontFamily = monoFont, color = palette.fg, fontSize = fontScaleSp.sp),
+                                cursorBrush = SolidColor(palette.project),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 8.dp)
+                            )
+                            Text(
+                                text = " |",
+                                color = palette.fgMuted,
+                                fontSize = 12.sp,
+                                fontFamily = monoFont
+                            )
+                        }
+                        AsciiHorizontalBorder(corner = "|")
+
+                        // Row 2: 1-Tap Priority Selector (`None | (A) | (B) | (C)`)
+                        val currentPriKey = parsedDraft.priority?.toString() ?: ""
+                        AsciiBoxOptionRow(
+                            label = "[!] Priority",
+                            options = listOf(
+                                "" to "None",
+                                "A" to "(A)",
+                                "B" to "(B)",
+                                "C" to "(C)"
+                            ),
+                            selectedValue = currentPriKey,
+                            onSelect = { priCode ->
+                                val newPri = priCode.firstOrNull()
+                                val updated = parsedDraft.copy(priority = newPri, isDirty = true)
+                                editingTaskDraft = TodoParser.serializeLine(updated)
                             },
-                            Triple(if (isTargetGcalSynced) "[#✓ GCal]" else "[# GCal]", palette.contextTag) {
-                                val parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
-                                if (gcalManager.hasCalendarPermissions()) {
-                                    val (synced, ok) = gcalManager.syncTaskToGoogleCalendar(parsed)
-                                    if (ok) {
-                                        persistAndSchedule(
-                                            tasks.map { if (it.lineNumber == target.lineNumber) synced else it }
-                                        )
-                                        editingTask = null
-                                        statusBanner = "[#] Synced to GCal"
+                            activeColor = when (currentPriKey) {
+                                "A" -> palette.priorityA
+                                "B" -> palette.priorityB
+                                "C" -> palette.priorityC
+                                else -> palette.fgMuted
+                            },
+                            fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
+                        )
+                        AsciiHorizontalBorder(corner = "|")
+
+                        // Row 3: Date & Time + Relative Delta (Tapping opens the 3-Column Wheel Picker!)
+                        AsciiBoxLeftRightRow(
+                            left = "(L) $formattedDateLine",
+                            right = "$deltaStr [zZ Snooze]",
+                            leftColor = palette.fg,
+                            rightColor = palette.reminder,
+                            fontSizeSp = fontScaleSp,
+                            boldLeft = true,
+                            boldRight = true,
+                            underlineRight = true,
+                            onClick = { showEditSnoozeWheel = true }
+                        )
+                        AsciiHorizontalBorder(corner = "|")
+
+                        // Row 4: Show as Notification vs Alarm (from Screenshot 1)
+                        AsciiBoxOptionRow(
+                            label = "[!] Show as",
+                            options = listOf(
+                                "n" to "Notification",
+                                "a" to "Alarm"
+                            ),
+                            selectedValue = editTaskAlertType,
+                            onSelect = { newType ->
+                                editTaskAlertType = newType
+                                var parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+                                val updatedRems = if (parsed.reminderSpecs.isEmpty()) {
+                                    listOf("0m/$newType")
+                                } else {
+                                    parsed.reminderSpecs.map { spec ->
+                                        val base = spec.substringBefore("/")
+                                        "$base/$newType"
+                                    }
+                                }
+                                parsed = TodoParser.withReplacedMultiTag(parsed, "rem", updatedRems)
+                                editingTaskDraft = TodoParser.serializeLine(parsed)
+                            },
+                            activeColor = if (editTaskAlertType == "a") palette.priorityB else palette.reminder,
+                            fontSizeSp = fontScaleSp
+                        )
+                        AsciiHorizontalBorder(corner = "|")
+
+                        // Row 5: Uniform Actions Bar: [zZ Snooze]  [# GCal]  [✓ Save]  [X Delete]
+                        AsciiBoxActionRow(
+                            actions = listOf(
+                                Triple("[zZ Snooze]", palette.project) {
+                                    showEditSnoozeWheel = true
+                                },
+                                Triple(if (isTargetGcalSynced) "[# Synced]" else "[# GCal]", palette.contextTag) {
+                                    val parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+                                    if (gcalManager.hasCalendarPermissions()) {
+                                        val (synced, ok) = gcalManager.syncTaskToGoogleCalendar(parsed)
+                                        if (ok) {
+                                            persistAndSchedule(
+                                                tasks.map { if (it.lineNumber == target.lineNumber) synced else it }
+                                            )
+                                            editingTask = null
+                                            statusBanner = "[# GCal] Synced"
+                                        } else {
+                                            gcalManager.openInGoogleCalendarApp(parsed)
+                                        }
                                     } else {
                                         gcalManager.openInGoogleCalendarApp(parsed)
                                     }
-                                } else {
-                                    gcalManager.openInGoogleCalendarApp(parsed)
+                                },
+                                Triple("[✓ Save]", palette.reminder) {
+                                    undoSnapshot = tasks
+                                    val reParsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber).copy(isDirty = true)
+                                    persistAndSchedule(
+                                        tasks.map { if (it.lineNumber == target.lineNumber) reParsed else it }
+                                    )
+                                    editingTask = null
+                                    statusBanner = "[✓ Save] Updated task"
+                                },
+                                Triple("[X Delete]", palette.priorityA) {
+                                    undoSnapshot = tasks
+                                    persistAndSchedule(tasks.filterNot { it.lineNumber == target.lineNumber })
+                                    editingTask = null
+                                    statusBanner = "[X Delete] Removed task"
                                 }
-                            },
-                            Triple("[✓ Save]", palette.project) {
-                                undoSnapshot = tasks
-                                val reParsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber).copy(isDirty = true)
-                                persistAndSchedule(
-                                    tasks.map { if (it.lineNumber == target.lineNumber) reParsed else it }
-                                )
-                                editingTask = null
-                                statusBanner = "[✓] Saved task"
-                            },
-                            Triple("[X Del]", palette.priorityA) {
-                                undoSnapshot = tasks
-                                persistAndSchedule(tasks.filterNot { it.lineNumber == target.lineNumber })
-                                editingTask = null
-                                statusBanner = "[X] Deleted task"
-                            }
-                        ),
-                        fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
-                    )
-                    AsciiHorizontalBorder()
+                            ),
+                            fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
+                        )
+                        AsciiHorizontalBorder()
+                    }
                 }
             }
         }
 
         // =====================================================================
-        // POPUP 3: ADD TASK & PER-TODO ALERT MODE MODAL (Shaded Background)
+        // POPUP 3: ADD TASK POPUP + WHEEL SNOOZE PICKER
         // =====================================================================
         if (showAddTaskPopup) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.76f))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { showAddTaskPopup = false }
-                    .padding(horizontal = 14.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
+            if (showAddSnoozeWheel) {
+                AsciiSnoozeWheelPopup(
+                    taskTitle = smartInput.ifBlank { "New Task" },
+                    initialDate = parsePreview?.dueDate ?: currentNow.toLocalDate(),
+                    initialTime = parsePreview?.dueTime ?: LocalTime.now().plusMinutes(10).withSecond(0).withNano(0),
+                    fontSizeSp = fontScaleSp,
+                    confirmLabel = "[✓ Save]",
+                    onDismiss = { showAddSnoozeWheel = false },
+                    onConfirmDateTime = { chosenDate, chosenTime, _ ->
+                        val dStr = chosenDate.toString()
+                        val tStr = "%02d:%02d".format(chosenTime.hour, chosenTime.minute)
+                        val cleaned = smartInput
+                            .replace(Regex("\\bdue:\\S+"), "")
+                            .replace(Regex("\\bduetime:\\S+"), "")
+                            .trim()
+                        smartInput = "$cleaned due:$dStr duetime:$tStr".trim()
+                        showAddSnoozeWheel = false
+                    }
+                )
+            } else {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .background(palette.bg)
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.78f))
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) {}
-                        .padding(10.dp)
+                        ) { showAddTaskPopup = false }
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    AsciiTitledTopBorder(
-                        badgeText = "+ ADD TASK",
-                        badgeColor = palette.reminder,
-                        rightBadgeText = "X Close",
-                        rightBadgeColor = palette.fgMuted,
-                        onRightBadgeClick = { showAddTaskPopup = false }
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(palette.bg)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {}
+                            .padding(10.dp)
                     ) {
-                        Text(
-                            text = "| > ",
-                            color = palette.reminder,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp,
-                            fontFamily = monoFont
+                        AsciiTitledTopBorder(
+                            badgeText = "+ ADD REMINDER / TASK",
+                            badgeColor = palette.reminder,
+                            rightBadgeText = "X Close",
+                            rightBadgeColor = palette.fgMuted,
+                            onRightBadgeClick = { showAddTaskPopup = false }
                         )
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(vertical = 8.dp),
-                            contentAlignment = Alignment.CenterStart
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (smartInput.isEmpty()) {
-                                Text(
-                                    text = "check chocotat at factory in 1m...",
-                                    color = palette.fgMuted,
-                                    fontSize = 13.sp,
-                                    fontFamily = monoFont,
-                                    maxLines = 1
+                            Text(
+                                text = "| > ",
+                                color = palette.reminder,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                fontFamily = monoFont
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                if (smartInput.isEmpty()) {
+                                    Text(
+                                        text = "check chocotat at factory in 1m...",
+                                        color = palette.fgMuted,
+                                        fontSize = 13.sp,
+                                        fontFamily = monoFont,
+                                        maxLines = 1
+                                    )
+                                }
+                                BasicTextField(
+                                    value = smartInput,
+                                    onValueChange = {
+                                        smartInput = it
+                                        disabledSpans = emptySet()
+                                    },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(onDone = { submitSmartAdd() }),
+                                    textStyle = TextStyle(
+                                        fontFamily = monoFont,
+                                        color = palette.fg,
+                                        fontSize = fontScaleSp.sp
+                                    ),
+                                    cursorBrush = SolidColor(palette.reminder),
+                                    modifier = Modifier.fillMaxWidth()
                                 )
                             }
-                            BasicTextField(
-                                value = smartInput,
-                                onValueChange = {
-                                    smartInput = it
-                                    disabledSpans = emptySet()
-                                },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                                keyboardActions = KeyboardActions(onDone = { submitSmartAdd() }),
-                                textStyle = TextStyle(
-                                    fontFamily = monoFont,
-                                    color = palette.fg,
-                                    fontSize = fontScaleSp.sp
-                                ),
-                                cursorBrush = SolidColor(palette.reminder),
-                                modifier = Modifier.fillMaxWidth()
+                            Text(
+                                text = " |",
+                                color = palette.fgMuted,
+                                fontSize = 12.sp,
+                                fontFamily = monoFont
                             )
                         }
-                        Text(
-                            text = " |",
-                            color = palette.fgMuted,
-                            fontSize = 12.sp,
-                            fontFamily = monoFont
-                        )
-                    }
 
-                    if (parsePreview != null && parsePreview.recognizedSpans.isNotEmpty()) {
+                        if (parsePreview != null && parsePreview.recognizedSpans.isNotEmpty()) {
+                            AsciiHorizontalBorder(corner = "|")
+                            AsciiBoxOptionRow(
+                                label = "[*]",
+                                options = parsePreview.recognizedSpans.map { it.id to "${it.resolvedToken}[x]" },
+                                selectedValue = "",
+                                onSelect = { spanId -> disabledSpans = disabledSpans + spanId },
+                                activeColor = palette.reminder,
+                                fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
+                            )
+                        }
+
                         AsciiHorizontalBorder(corner = "|")
+                        // 1-Tap Priority Selector (`None | (A) | (B) | (C)`)
+                        val addPriKey = addTaskPriority?.toString() ?: ""
                         AsciiBoxOptionRow(
-                            label = "[*]",
-                            options = parsePreview.recognizedSpans.map { it.id to "${it.resolvedToken}[x]" },
-                            selectedValue = "",
-                            onSelect = { spanId -> disabledSpans = disabledSpans + spanId },
-                            activeColor = palette.reminder,
+                            label = "[!] Priority",
+                            options = listOf(
+                                "" to "None",
+                                "A" to "(A)",
+                                "B" to "(B)",
+                                "C" to "(C)"
+                            ),
+                            selectedValue = addPriKey,
+                            onSelect = { addTaskPriority = it.firstOrNull() },
+                            activeColor = when (addPriKey) {
+                                "A" -> palette.priorityA
+                                "B" -> palette.priorityB
+                                "C" -> palette.priorityC
+                                else -> palette.fgMuted
+                            },
                             fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
                         )
-                    }
 
-                    AsciiHorizontalBorder(corner = "|")
-                    // Per-todo option: Alarm vs Notification
-                    AsciiBoxOptionRow(
-                        label = "[!] Alert",
-                        options = listOf(
-                            "a" to "Alarm",
-                            "n" to "Notification"
-                        ),
-                        selectedValue = addTaskAlertType,
-                        onSelect = { addTaskAlertType = it },
-                        activeColor = if (addTaskAlertType == "a") palette.priorityB else palette.reminder,
-                        fontSizeSp = fontScaleSp
-                    )
-                    AsciiBoxOptionRow(
-                        label = "[zZ] Unit",
-                        options = SnoozeUnit.entries.map { it to it.asciiLabel.lowercase() },
-                        selectedValue = pickerUnit,
-                        onSelect = { u ->
-                            pickerUnit = u
-                            pickerAmount = u.quickValues.first()
-                        },
-                        activeColor = palette.project,
-                        fontSizeSp = fontScaleSp
-                    )
-                    AsciiBoxOptionRow(
-                        label = "[+] Time",
-                        options = pickerUnit.quickValues.map { qv -> "in $qv${pickerUnit.code}" to "+$qv${pickerUnit.code}" },
-                        selectedValue = "",
-                        onSelect = { chip ->
-                            smartInput = if (smartInput.isBlank()) chip else "${smartInput.trim()} $chip"
-                        },
-                        activeColor = palette.priorityB,
-                        fontSizeSp = fontScaleSp
-                    )
-                    AsciiHorizontalBorder(corner = "|")
-                    AsciiBoxActionRow(
-                        actions = listOf(
-                            Triple("[X Cancel]", palette.fgMuted) { showAddTaskPopup = false },
-                            Triple("[+ Add Task >]", palette.reminder) { submitSmartAdd() }
-                        ),
-                        fontSizeSp = fontScaleSp
-                    )
-                    AsciiHorizontalBorder()
+                        AsciiHorizontalBorder(corner = "|")
+                        // Date & Time Wheel Trigger Row (matching Screenshot 1)
+                        val previewDateText = if (parsePreview?.dueDate != null) {
+                            "${parsePreview.dueDate} ${parsePreview.dueTime ?: ""}".trim()
+                        } else {
+                            "Tap to pick Date & Time"
+                        }
+                        AsciiBoxLeftRightRow(
+                            left = "(L) $previewDateText",
+                            right = "[zZ Snooze]",
+                            leftColor = palette.fg,
+                            rightColor = palette.project,
+                            fontSizeSp = fontScaleSp,
+                            boldRight = true,
+                            underlineRight = true,
+                            onClick = { showAddSnoozeWheel = true }
+                        )
+                        AsciiHorizontalBorder(corner = "|")
+
+                        // Show as Notification vs Alarm (from Screenshot 1)
+                        AsciiBoxOptionRow(
+                            label = "[!] Show as",
+                            options = listOf(
+                                "n" to "Notification",
+                                "a" to "Alarm"
+                            ),
+                            selectedValue = addTaskAlertType,
+                            onSelect = { addTaskAlertType = it },
+                            activeColor = if (addTaskAlertType == "a") palette.priorityB else palette.reminder,
+                            fontSizeSp = fontScaleSp
+                        )
+                        AsciiHorizontalBorder(corner = "|")
+
+                        // Uniform Bottom Action Bar: [X Close]   &   [+ Add]
+                        AsciiBoxActionRow(
+                            actions = listOf(
+                                Triple("[X Close]", palette.fgMuted) { showAddTaskPopup = false },
+                                Triple("[+ Add]", palette.reminder) { submitSmartAdd() }
+                            ),
+                            fontSizeSp = fontScaleSp
+                        )
+                        AsciiHorizontalBorder()
+                    }
                 }
             }
         }
@@ -1443,17 +1567,15 @@ fun MainScreen(
 }
 
 /**
- * Ultra-Clean 3-Line Task Box:
- * Line 1: `+--[2026-11-02 09:00 • ALM]----------[+chocotat @factory]--+`
- * Line 2: `| [ ] check chocotat                                       |`
+ * 3-Line Task Card with Live Relative Countdown Badge (like `32 d.` / `15 m.` / `-5 m.` in Screenshot 1):
+ * Line 1: `+--[2026-11-02 09:00 • ALM]----------[+chocotat • 15 m.]--+`
+ * Line 2: `| [ ] (A) check chocotat                                   |`
  * Line 3: `+----------------------------------------------------------+`
- * - Clicking `[ ]` on the left marks the task Done (`[x]`) / Reopened (`[ ]`).
- * - Clicking the task text opens the Task Click Popup over a shaded background.
- * - Swiping Right marks Done; Swiping Left deletes the task.
  */
 @Composable
 private fun UsableTaskCard(
     task: TodoTask,
+    currentNow: LocalDateTime = LocalDateTime.now(),
     fontSizeSp: Int = 15,
     fontScaleSp: Int = fontSizeSp,
     onToggleDone: () -> Unit,
@@ -1480,30 +1602,41 @@ private fun UsableTaskCard(
         else -> "OPEN"
     }
 
+    val relativeBadge = remember(task.dueDate, task.dueTime, task.isCompleted, currentNow) {
+        if (task.isCompleted || task.dueDate == null) null
+        else {
+            val targetDt = LocalDateTime.of(task.dueDate, task.dueTime ?: LocalTime.of(9, 0))
+            PlainTextSportsAscii.formatRelativeDelta(currentNow, targetDt)
+        }
+    }
+
     val rightTagsSummary = buildString {
         task.projects.firstOrNull()?.let { append("+$it") }
         task.contexts.firstOrNull()?.let {
             if (isNotEmpty()) append(" ")
             append("@$it")
         }
+        if (relativeBadge != null) {
+            if (isNotEmpty()) append(" • ")
+            append(relativeBadge)
+        }
     }.ifEmpty { null }
+
+    val rightBadgeColor = if (relativeBadge?.startsWith("-") == true) palette.priorityA else palette.project
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(palette.bg)
     ) {
-        // Line 1: +--[Date and Time]-----------------------+
         AsciiTitledTopBorder(
             badgeText = topDateAndTime,
             badgeColor = if (task.isCompleted) palette.reminder else palette.priorityB,
             rightBadgeText = rightTagsSummary,
-            rightBadgeColor = palette.project,
+            rightBadgeColor = rightBadgeColor,
             onRightBadgeClick = { onTapTask() }
         )
 
-        // Line 2: | [ ] Check Chocotat                     |
-        // Left `[ ]` rectangle is clickable for Done; rest of row is clickable for Task Popup!
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1576,7 +1709,6 @@ private fun UsableTaskCard(
             )
         }
 
-        // Line 3: +----------------------------------------+
         AsciiHorizontalBorder()
     }
 }

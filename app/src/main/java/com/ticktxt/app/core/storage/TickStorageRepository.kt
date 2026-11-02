@@ -15,7 +15,8 @@ import java.io.File
 data class PersistedSettings(
     val themeMode: ThemeMode = ThemeMode.DRACULA_DARK,
     val fontMode: FontMode = FontMode.MONOSPACE,
-    val fontSizeSp: Int = 13,
+    val fontSizeSp: Int = 16,
+    val autoSyncGoogleCalendar: Boolean = true,
     val defaultTimedReminder: String = "0m/n",
     val defaultDateOnlyReminder: String = "09:00/n",
     val customSafUri: String? = null
@@ -135,7 +136,8 @@ class TickStorageRepository(private val context: Context) {
     fun loadSettings(): PersistedSettings {
         val themeStr = prefs.getString(KEY_THEME, ThemeMode.DRACULA_DARK.name) ?: ThemeMode.DRACULA_DARK.name
         val fontStr = prefs.getString(KEY_FONT_MODE, FontMode.MONOSPACE.name) ?: FontMode.MONOSPACE.name
-        val sizeSp = prefs.getInt(KEY_FONT_SIZE, 13)
+        val sizeSp = prefs.getInt(KEY_FONT_SIZE, 16)
+        val autoSyncCal = prefs.getBoolean(KEY_AUTO_GCAL, true)
         val timedRem = prefs.getString(KEY_TIMED_REM, "0m/n") ?: "0m/n"
         val dateOnlyRem = prefs.getString(KEY_DATE_REM, "09:00/n") ?: "09:00/n"
         val safUri = prefs.getString(KEY_SAF_URI, null)
@@ -144,6 +146,7 @@ class TickStorageRepository(private val context: Context) {
             themeMode = runCatching { ThemeMode.valueOf(themeStr) }.getOrDefault(ThemeMode.DRACULA_DARK),
             fontMode = runCatching { FontMode.valueOf(fontStr) }.getOrDefault(FontMode.MONOSPACE),
             fontSizeSp = sizeSp,
+            autoSyncGoogleCalendar = autoSyncCal,
             defaultTimedReminder = timedRem,
             defaultDateOnlyReminder = dateOnlyRem,
             customSafUri = safUri
@@ -155,6 +158,7 @@ class TickStorageRepository(private val context: Context) {
             .putString(KEY_THEME, settings.themeMode.name)
             .putString(KEY_FONT_MODE, settings.fontMode.name)
             .putInt(KEY_FONT_SIZE, settings.fontSizeSp)
+            .putBoolean(KEY_AUTO_GCAL, settings.autoSyncGoogleCalendar)
             .putString(KEY_TIMED_REM, settings.defaultTimedReminder)
             .putString(KEY_DATE_REM, settings.defaultDateOnlyReminder)
             .putString(KEY_SAF_URI, settings.customSafUri)
@@ -192,5 +196,6 @@ class TickStorageRepository(private val context: Context) {
         private const val KEY_TIMED_REM = "pref_timed_rem"
         private const val KEY_DATE_REM = "pref_date_rem"
         private const val KEY_SAF_URI = "pref_saf_uri"
+        private const val KEY_AUTO_GCAL = "pref_auto_gcal"
     }
 }

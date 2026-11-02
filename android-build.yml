@@ -1,4 +1,4 @@
-name: Android CI (Build APK & Unit Tests)
+name: Android CI (Build Signed APK & Unit Tests)
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-and-test:
-    name: Compile tick.txt APK & Run JUnit5 Suite
+    name: Compile Signed tick.txt APK & Run JUnit5 Suite
     runs-on: ubuntu-latest
 
     steps:
@@ -35,23 +35,20 @@ jobs:
       - name: Run JUnit 5 Unit Tests (todo.txt parser, reminders, offline NLP)
         run: gradle testDebugUnitTest --stacktrace
 
-      - name: Assemble Debug APK
-        run: gradle assembleDebug --stacktrace
+      - name: Assemble Signed Debug & Release APKs
+        run: gradle assembleDebug assembleRelease --stacktrace
 
-      - name: Assemble Release APK (unsigned)
-        run: gradle assembleRelease --stacktrace
+      - name: Upload Signed Release APK (Ready to Install)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tick-txt-release-signed-apk
+          path: app/build/outputs/apk/release/*.apk
 
-      - name: Upload Compiled Debug APK
+      - name: Upload Signed Debug APK (Ready to Install)
         uses: actions/upload-artifact@v4
         with:
           name: tick-txt-debug-apk
           path: app/build/outputs/apk/debug/*.apk
-
-      - name: Upload Compiled Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: tick-txt-release-apk
-          path: app/build/outputs/apk/release/*.apk
 
       - name: Upload Unit Test Report
         if: always()

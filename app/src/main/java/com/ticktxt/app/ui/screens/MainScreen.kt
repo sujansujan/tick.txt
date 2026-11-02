@@ -1122,6 +1122,7 @@ fun MainScreen(
 private fun UsableTaskCard(
     task: TodoTask,
     fontSizeSp: Int,
+    fontScaleSp: Int = fontSizeSp,
     onToggleDone: () -> Unit,
     onTapTask: () -> Unit,
     onSyncCalendar: () -> Unit

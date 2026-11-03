@@ -32,7 +32,7 @@ data class SafFolderLoadResult(
 
 /**
  * Single source-of-truth disk manager for `todo.txt`, `done.txt`, `tick.rules.txt`,
- * Markdown `notes/*.md`, and `SharedPreferences` settings.
+ * Markdown `.md` notes in `notes/`, and `SharedPreferences` settings.
  */
 class TickStorageRepository(private val context: Context) {
 

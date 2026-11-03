@@ -100,7 +100,7 @@ data class TickRulesConfig(
             "at desk", "on laptop" -> @desk
         """.trimIndent() + "\n"
 
-        private val LEARNING_STOPWORDS = setOf(
+        val LEARNING_STOPWORDS = setOf(
             "the", "and", "for", "with", "from", "into", "about", "after", "before",
             "check", "review", "fix", "build", "update", "call", "email", "pay", "buy",
             "clean", "finish", "prepare", "send", "test", "visit", "inspect", "audit",

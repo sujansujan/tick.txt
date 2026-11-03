@@ -86,8 +86,11 @@ import java.util.Locale
 // Optimization #5: Pre-compiled Regexes
 private val DUE_TAG_REGEX = Regex("\\bdue:\\S+")
 private val DUETIME_TAG_REGEX = Regex("\\bduetime:\\S+")
-private val CHECKBOX_LINE_REGEX = Regex("^(\\s*[-*]\\s+\\[)([ xX])(\\]\\s+.*)$")
+// Matches `- [ ]` or `- [x]` even when there is no text after `]`
+private val CHECKBOX_LINE_REGEX = Regex("^(\\s*[-*]\\s+\\[)([ xX])(\\]\\s*.*)$")
 private val INLINE_MD_TOKEN_REGEX = Regex("(\\*\\*[^*]+\\*\\*|\\*[^*]+\\*|`[^`]+`)")
+
+private const val NEW_NOTE_SENTINEL = "__NEW_NOTE__"
 
 private fun toggleTagInText(rawText: String, tag: String): String {
     val tokens = rawText.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.toMutableList()
@@ -110,6 +113,169 @@ private fun toggleMarkdownCheckboxAtLine(rawMarkdown: String, targetLineIndex: I
         lines[targetLineIndex] = "${match.groupValues[1]}$nextMark${match.groupValues[3]}"
     }
     return lines.joinToString("\n")
+}
+
+/**
+ * Word-wraps a string into chunks of at most `maxChars` so every visual row inside a
+ * Keep-style ASCII card has unbroken `| ... |` side borders and never cuts off short notes.
+ */
+private fun wrapTextToChunks(text: String, maxChars: Int): List<String> {
+    val clean = text.trim()
+    if (clean.isEmpty()) return listOf("")
+    val safeMax = maxChars.coerceAtLeast(10)
+    if (clean.length <= safeMax) return listOf(clean)
+
+    val words = clean.split(Regex("\\s+"))
+    val chunks = mutableListOf<String>()
+    var current = StringBuilder()
+
+    for (word in words) {
+        if (current.isEmpty()) {
+            if (word.length <= safeMax) {
+                current.append(word)
+            } else {
+                var idx = 0
+                while (idx < word.length) {
+                    val end = (idx + safeMax).coerceAtMost(word.length)
+                    val piece = word.substring(idx, end)
+                    if (end == word.length) {
+                        current.append(piece)
+                    } else {
+                        chunks.add(piece)
+                    }
+                    idx = end
+                }
+            }
+        } else if (current.length + 1 + word.length <= safeMax) {
+            current.append(' ').append(word)
+        } else {
+            chunks.add(current.toString())
+            current = StringBuilder()
+            if (word.length <= safeMax) {
+                current.append(word)
+            } else {
+                var idx = 0
+                while (idx < word.length) {
+                    val end = (idx + safeMax).coerceAtMost(word.length)
+                    val piece = word.substring(idx, end)
+                    if (end == word.length) {
+                        current.append(piece)
+                    } else {
+                        chunks.add(piece)
+                    }
+                    idx = end
+                }
+            }
+        }
+    }
+    if (current.isNotEmpty()) {
+        chunks.add(current.toString())
+    }
+    return chunks.ifEmpty { listOf("") }
+}
+
+private data class WrappedNoteCardRow(
+    val originalLineIdx: Int,
+    val prefixToken: String,     // e.g. "[ ] ", "[x] ", "# ", "• ", "| ", or "  " for continuation
+    val prefixColorType: String, // "check_on", "check_off", "heading", "bullet", "quote", "plain"
+    val bodyText: String,
+    val isCheckedItem: Boolean = false,
+    val isHeading: Boolean = false,
+    val isQuote: Boolean = false,
+    val isCheckboxFirstRow: Boolean = false
+)
+
+private fun buildWrappedCardRows(bodyContent: String, maxCharsPerLine: Int): List<WrappedNoteCardRow> {
+    val result = mutableListOf<WrappedNoteCardRow>()
+    val lines = bodyContent.lines()
+
+    for ((idx, rawLine) in lines.withIndex()) {
+        val trimmed = rawLine.trim()
+        if (trimmed.isEmpty()) continue
+
+        val checkboxMatch = CHECKBOX_LINE_REGEX.matchEntire(rawLine)
+        when {
+            checkboxMatch != null -> {
+                val isChecked = checkboxMatch.groupValues[2].equals("x", ignoreCase = true)
+                val itemText = checkboxMatch.groupValues[3].removePrefix("]").trim()
+                val chunks = wrapTextToChunks(itemText, (maxCharsPerLine - 4).coerceAtLeast(10))
+                chunks.forEachIndexed { cIdx, chunk ->
+                    result.add(
+                        WrappedNoteCardRow(
+                            originalLineIdx = idx,
+                            prefixToken = if (cIdx == 0) (if (isChecked) "[x] " else "[ ] ") else "    ",
+                            prefixColorType = if (isChecked) "check_on" else "check_off",
+                            bodyText = chunk,
+                            isCheckedItem = isChecked,
+                            isCheckboxFirstRow = (cIdx == 0)
+                        )
+                    )
+                }
+            }
+
+            trimmed.startsWith("#") -> {
+                val headingText = trimmed.trimStart('#').trim()
+                val chunks = wrapTextToChunks(headingText, (maxCharsPerLine - 2).coerceAtLeast(10))
+                chunks.forEachIndexed { cIdx, chunk ->
+                    result.add(
+                        WrappedNoteCardRow(
+                            originalLineIdx = idx,
+                            prefixToken = if (cIdx == 0) "# " else "  ",
+                            prefixColorType = "heading",
+                            bodyText = chunk,
+                            isHeading = true
+                        )
+                    )
+                }
+            }
+
+            trimmed.startsWith(">") -> {
+                val quoteText = trimmed.removePrefix(">").trim()
+                val chunks = wrapTextToChunks(quoteText, (maxCharsPerLine - 2).coerceAtLeast(10))
+                chunks.forEach { chunk ->
+                    result.add(
+                        WrappedNoteCardRow(
+                            originalLineIdx = idx,
+                            prefixToken = "| ",
+                            prefixColorType = "quote",
+                            bodyText = chunk,
+                            isQuote = true
+                        )
+                    )
+                }
+            }
+
+            trimmed.startsWith("- ") || trimmed.startsWith("* ") -> {
+                val bulletBody = trimmed.substring(2).trim()
+                val chunks = wrapTextToChunks(bulletBody, (maxCharsPerLine - 2).coerceAtLeast(10))
+                chunks.forEachIndexed { cIdx, chunk ->
+                    result.add(
+                        WrappedNoteCardRow(
+                            originalLineIdx = idx,
+                            prefixToken = if (cIdx == 0) "• " else "  ",
+                            prefixColorType = "bullet",
+                            bodyText = chunk
+                        )
+                    )
+                }
+            }
+
+            else -> {
+                val chunks = wrapTextToChunks(trimmed, maxCharsPerLine.coerceAtLeast(12))
+                chunks.forEach { chunk ->
+                    result.add(
+                        WrappedNoteCardRow(
+                            originalLineIdx = idx,
+                            prefixToken = "",
+                            prefixColorType = "plain",
+                            bodyText = chunk
+                        )
+                    )
+                }
+            }
+        }
+    }
+    return result
 }
 
 private fun renderInlineMarkdown(
@@ -173,12 +339,6 @@ data class ActiveAlarmPayload(
     val notifId: Int = 100
 )
 
-/**
- * Main screen following a strict, uniform ASCII UX Design System:
- * - 4-Layer Offline Project (`+`) & Context (`@`) Inference Engine (`RulesEngine.withHistoricalLearning`)
- * - Google Keep-Style 2-Column Masonry Grid of Markdown-only (`.md`) Notes + Shaded Markdown Note Popup
- * - Pure Full-Screen + Persistent Shade Notifications.
- */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
@@ -200,8 +360,6 @@ fun MainScreen(
     var doneLines by remember { mutableStateOf(storageRepo.loadDoneLines()) }
     var rulesText by remember { mutableStateOf(storageRepo.loadRulesText()) }
 
-    // 4-Layer Offline Inference Config: combines `tick.rules.txt` with historical co-occurrences
-    // and known vocabulary learned from `todo.txt` + `done.txt`!
     val activeRules = remember(rulesText, settings.defaultTimedReminder, settings.defaultDateOnlyReminder, tasks, doneLines) {
         val base = RulesEngine.parse(rulesText).copy(
             timedReminderDefault = settings.defaultTimedReminder,
@@ -211,23 +369,12 @@ fun MainScreen(
     }
 
     var notes by remember { mutableStateOf(storageRepo.loadNotes()) }
-    // Shaded Popup state for Google Keep-style Markdown Notes
+    var notesTwoColumnMode by remember { mutableStateOf(true) }
     var activeNotePopupFilename by remember { mutableStateOf<String?>(null) }
     var noteEditMode by remember { mutableStateOf(false) }
     var noteDraftName by remember { mutableStateOf("") }
     var noteDraftText by remember { mutableStateOf("") }
-
-    // Optimization #2: 300ms debounced background I/O for Markdown Notes editor typing
-    LaunchedEffect(noteDraftText, noteDraftName, noteEditMode, activeNotePopupFilename) {
-        if (activeNotePopupFilename != null && noteEditMode && noteDraftName.isNotBlank()) {
-            delay(300L)
-            val safeMdName = NotesRepository.toHumanReadableFilename(noteDraftName, ".md")
-            val saved = withContext(Dispatchers.IO) {
-                storageRepo.saveNote(safeMdName, noteDraftText)
-            }
-            notes = saved
-        }
-    }
+    var undoDeletedNote by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     // Pager for swiping between tabs (0 = Tasks, 1 = Notes, 2 = Settings)
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
@@ -462,16 +609,63 @@ fun MainScreen(
         noteEditMode = startInEditMode
     }
 
+    /**
+     * Opens a blank Markdown note draft in the popup WITHOUT writing a placeholder file to disk first.
+     * The file is only saved once when you finish/save or close with content—preventing duplicate/orphan notes!
+     */
     fun createAndOpenNewMarkdownNote() {
-        val name = "note-${notes.size + 1}.md"
-        val initialBody = "# Note ${notes.size + 1}\n\n- [ ] "
-        activeNotePopupFilename = name
-        noteDraftName = name
-        noteDraftText = initialBody
+        activeNotePopupFilename = NEW_NOTE_SENTINEL
+        noteDraftName = ""
+        noteDraftText = ""
         noteEditMode = true
+    }
+
+    fun commitNoteDraftAndClose(closePopup: Boolean = true) {
+        val currentOrigin = activeNotePopupFilename ?: return
+        val trimmedTitle = noteDraftName.trim()
+        val trimmedBody = noteDraftText.trim()
+
+        // If brand-new note and completely empty, discard without creating any file
+        if (currentOrigin == NEW_NOTE_SENTINEL && trimmedTitle.isEmpty() && trimmedBody.isEmpty()) {
+            if (closePopup) {
+                noteEditMode = false
+                activeNotePopupFilename = null
+            }
+            return
+        }
+
+        val derivedNameSource = when {
+            trimmedTitle.isNotEmpty() -> trimmedTitle
+            currentOrigin != NEW_NOTE_SENTINEL -> currentOrigin
+            else -> {
+                val firstLine = trimmedBody.lines().firstOrNull { it.isNotBlank() }
+                    ?.trimStart('#', '-', '*', '>', ' ')
+                    ?.take(28)
+                    ?.ifBlank { "note-${notes.size + 1}" }
+                    ?: "note-${notes.size + 1}"
+                firstLine
+            }
+        }
+        val safeTargetName = NotesRepository.toHumanReadableFilename(derivedNameSource, ".md")
+        val bodyToSave = noteDraftText
+
+        if (closePopup) {
+            noteEditMode = false
+            activeNotePopupFilename = null
+        } else {
+            noteEditMode = false
+            activeNotePopupFilename = safeTargetName
+            noteDraftName = safeTargetName
+        }
+
         coroutineScope.launch(Dispatchers.IO) {
-            val saved = storageRepo.saveNote(name, initialBody)
-            withContext(Dispatchers.Main) { notes = saved }
+            if (currentOrigin != NEW_NOTE_SENTINEL && !currentOrigin.equals(safeTargetName, ignoreCase = true)) {
+                storageRepo.deleteNote(currentOrigin)
+            }
+            val saved = storageRepo.saveNote(safeTargetName, bodyToSave)
+            withContext(Dispatchers.Main) {
+                notes = saved
+            }
         }
     }
 
@@ -482,15 +676,23 @@ fun MainScreen(
                 val snapshotTasks = tasks
                 val snapshotDone = doneLines
                 val snapshotRules = rulesText
-                val shouldSaveNote = activeNotePopupFilename != null && noteEditMode && noteDraftName.isNotBlank()
+                val originNote = activeNotePopupFilename
+                val shouldSaveNote = originNote != null && noteEditMode && (noteDraftName.isNotBlank() || noteDraftText.isNotBlank())
                 val draftName = noteDraftName
                 val draftText = noteDraftText
                 coroutineScope.launch(Dispatchers.IO) {
                     storageRepo.saveTasks(snapshotTasks)
                     storageRepo.saveDoneLines(snapshotDone)
                     storageRepo.saveRulesText(snapshotRules)
-                    if (shouldSaveNote) {
-                        storageRepo.saveNote(draftName, draftText)
+                    if (shouldSaveNote && originNote != null) {
+                        val targetName = NotesRepository.toHumanReadableFilename(
+                            draftName.ifBlank { if (originNote != NEW_NOTE_SENTINEL) originNote else "note" },
+                            ".md"
+                        )
+                        if (originNote != NEW_NOTE_SENTINEL && !originNote.equals(targetName, ignoreCase = true)) {
+                            storageRepo.deleteNote(originNote)
+                        }
+                        storageRepo.saveNote(targetName, draftText)
                     }
                 }
             } else if (event == Lifecycle.Event.ON_RESUME) {
@@ -543,11 +745,6 @@ fun MainScreen(
         onDispose { runCatching { context.unregisterReceiver(receiver) } }
     }
 
-    // Back gesture state machine:
-    // 1. Closes any open wheel / popup / note modal / search
-    // 2. Returns to previousPlace (tab/filter) if set
-    // 3. Goes to Todo tab (page 0, "open") if not already there
-    // 4. Closes the app
     BackHandler(enabled = true) {
         when {
             showEditSnoozeWheel -> showEditSnoozeWheel = false
@@ -559,16 +756,7 @@ fun MainScreen(
             editingTask != null -> editingTask = null
             showAddTaskPopup -> showAddTaskPopup = false
             activeNotePopupFilename != null -> {
-                if (noteEditMode && noteDraftName.isNotBlank()) {
-                    val dName = NotesRepository.toHumanReadableFilename(noteDraftName, ".md")
-                    val dText = noteDraftText
-                    coroutineScope.launch(Dispatchers.IO) {
-                        val saved = storageRepo.saveNote(dName, dText)
-                        withContext(Dispatchers.Main) { notes = saved }
-                    }
-                }
-                noteEditMode = false
-                activeNotePopupFilename = null
+                commitNoteDraftAndClose(closePopup = true)
             }
             showTagsPopup -> showTagsPopup = false
             showSearchBar -> {
@@ -671,7 +859,6 @@ fun MainScreen(
         (dynamicProjects + dynamicContexts).take(8)
     }
 
-    // Smart sorting + live search filtering
     val filteredTasks = remember(tasks, activeFilter, searchQuery, searchHits) {
         val matchedTaskIds = if (searchQuery.isBlank()) null else searchHits.filter { it.kind == "task" }.map { it.id }.toSet()
         tasks.filter { task ->
@@ -693,6 +880,15 @@ fun MainScreen(
                 .thenBy { it.dueTime ?: LocalTime.MAX }
                 .thenBy { it.lineNumber }
         )
+    }
+
+    val filteredNotes = remember(notes, searchQuery, matchedNoteHits) {
+        if (searchQuery.isBlank()) {
+            notes
+        } else {
+            val matchedNames = matchedNoteHits.map { it.id }.toSet()
+            notes.filter { it.filename in matchedNames }
+        }
     }
 
     // =========================================================================
@@ -785,7 +981,6 @@ fun MainScreen(
                                     .fillMaxSize()
                                     .padding(horizontal = 12.dp, vertical = 4.dp)
                             ) {
-                                // 1. Single-Line Top Filter Bar: Open | All | Due | Done | [+@ Tags] | [/]
                                 val isTagFiltered = activeFilter.startsWith("+") || activeFilter.startsWith("@")
                                 val tagButtonLabel = if (isTagFiltered) "[*$activeFilter*]" else "[+@ Tags]"
 
@@ -862,7 +1057,6 @@ fun MainScreen(
                                     )
                                 }
 
-                                // Optimization #8: Expandable Inline ASCII Search Row across Tasks & Notes
                                 if (showSearchBar) {
                                     AsciiHorizontalBorder(corner = "|")
                                     Row(
@@ -956,7 +1150,7 @@ fun MainScreen(
                                     AsciiHorizontalBorder(corner = "|")
                                     AsciiBoxLeftRightRow(
                                         left = statusBanner ?: "",
-                                        right = if (undoSnapshot != null) "[↺ Undo]" else "[X Close]",
+                                        right = if (undoSnapshot != null || undoDeletedNote != null) "[↺ Undo]" else "[X Close]",
                                         leftColor = palette.reminder,
                                         rightColor = palette.project,
                                         fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12),
@@ -966,6 +1160,14 @@ fun MainScreen(
                                                 persistAndSchedule(undoSnapshot!!)
                                                 undoSnapshot = null
                                             }
+                                            if (undoDeletedNote != null) {
+                                                val (restoredName, restoredBody) = undoDeletedNote!!
+                                                undoDeletedNote = null
+                                                coroutineScope.launch(Dispatchers.IO) {
+                                                    val saved = storageRepo.saveNote(restoredName, restoredBody)
+                                                    withContext(Dispatchers.Main) { notes = saved }
+                                                }
+                                            }
                                             statusBanner = null
                                         }
                                     )
@@ -974,7 +1176,6 @@ fun MainScreen(
 
                                 Spacer(modifier = Modifier.height(4.dp))
 
-                                // 2. Dense 3-Line Task Cards List with Swipe Right = Done, Swipe Left = Delete
                                 LazyColumn(
                                     modifier = Modifier
                                         .weight(1f)
@@ -1139,9 +1340,11 @@ fun MainScreen(
                     }
 
                     1 -> {
-                        // TAB 1: GOOGLE KEEP-STYLE 2-COLUMN STAGGERED MARKDOWN NOTES BOARD
-                        val leftColumnNotes = remember(notes) { notes.filterIndexed { index, _ -> index % 2 == 0 } }
-                        val rightColumnNotes = remember(notes) { notes.filterIndexed { index, _ -> index % 2 == 1 } }
+                        // TAB 1: GOOGLE KEEP-STYLE STAGGERED MARKDOWN NOTES BOARD
+                        // - Shows up to half the screen height (~14 wrapped lines) per note card before truncating!
+                        // - Single `[+ Add]` button at bottom-right (no duplicate `[+ Add]` in top border, no static instruction banner).
+                        val leftColumnNotes = remember(filteredNotes) { filteredNotes.filterIndexed { index, _ -> index % 2 == 0 } }
+                        val rightColumnNotes = remember(filteredNotes) { filteredNotes.filterIndexed { index, _ -> index % 2 == 1 } }
 
                         Box(modifier = Modifier.fillMaxSize()) {
                             Column(
@@ -1149,26 +1352,171 @@ fun MainScreen(
                                     .fillMaxSize()
                                     .padding(horizontal = 12.dp, vertical = 4.dp)
                             ) {
-                                // Top Bar matching Tasks tab style
-                                AsciiTitledTopBorder(
-                                    badgeText = "/ MARKDOWN NOTES (${notes.size})",
-                                    badgeColor = palette.project,
-                                    rightBadgeText = "+ Add",
-                                    rightBadgeColor = palette.reminder,
-                                    onRightBadgeClick = { createAndOpenNewMarkdownNote() }
-                                )
-                                AsciiBoxLeftRightRow(
-                                    left = "Tap any card to open • Tap [ ] to check items",
-                                    right = ".md only",
-                                    leftColor = palette.fgMuted,
-                                    rightColor = palette.contextTag,
-                                    fontSizeSp = (fontScaleSp - 3).coerceAtLeast(11)
-                                )
+                                // Compact Functional Top Bar: [*2-Col*] | 1-Col | [/] Search
+                                AsciiHorizontalBorder()
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "| ",
+                                        color = palette.fgMuted,
+                                        fontSize = 12.sp,
+                                        fontFamily = monoFont
+                                    )
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "/ NOTES (${filteredNotes.size})",
+                                            color = palette.project,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
+                                            fontFamily = monoFont
+                                        )
+                                        Text(
+                                            text = if (notesTwoColumnMode) "[*2-Col*]" else "2-Col",
+                                            color = if (notesTwoColumnMode) palette.project else palette.fg,
+                                            fontWeight = if (notesTwoColumnMode) FontWeight.Bold else FontWeight.Normal,
+                                            fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
+                                            fontFamily = appFont,
+                                            modifier = Modifier
+                                                .clickable { notesTwoColumnMode = true }
+                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                        )
+                                        Text(
+                                            text = if (!notesTwoColumnMode) "[*1-Col*]" else "1-Col",
+                                            color = if (!notesTwoColumnMode) palette.project else palette.fg,
+                                            fontWeight = if (!notesTwoColumnMode) FontWeight.Bold else FontWeight.Normal,
+                                            fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
+                                            fontFamily = appFont,
+                                            modifier = Modifier
+                                                .clickable { notesTwoColumnMode = false }
+                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                        )
+                                        Text(
+                                            text = if (showSearchBar || searchQuery.isNotBlank()) "[*/Search*]" else "[/]",
+                                            color = if (showSearchBar || searchQuery.isNotBlank()) palette.reminder else palette.fgMuted,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
+                                            fontFamily = monoFont,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    showSearchBar = !showSearchBar
+                                                    if (!showSearchBar) searchQuery = ""
+                                                }
+                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = " |",
+                                        color = palette.fgMuted,
+                                        fontSize = 12.sp,
+                                        fontFamily = monoFont
+                                    )
+                                }
+
+                                if (showSearchBar) {
+                                    AsciiHorizontalBorder(corner = "|")
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "| / ",
+                                            color = palette.reminder,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            fontFamily = monoFont
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .padding(vertical = 2.dp),
+                                            contentAlignment = Alignment.CenterStart
+                                        ) {
+                                            if (searchQuery.isEmpty()) {
+                                                Text(
+                                                    text = "Search notes...",
+                                                    color = palette.fgMuted,
+                                                    fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
+                                                    fontFamily = monoFont,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                            BasicTextField(
+                                                value = searchQuery,
+                                                onValueChange = { searchQuery = it },
+                                                singleLine = true,
+                                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+                                                textStyle = TextStyle(
+                                                    fontFamily = monoFont,
+                                                    color = palette.fg,
+                                                    fontSize = (fontScaleSp - 1).coerceAtLeast(13).sp
+                                                ),
+                                                cursorBrush = SolidColor(palette.reminder),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .focusRequester(searchFocusRequester)
+                                            )
+                                        }
+                                        Text(
+                                            text = "[X Close]",
+                                            color = palette.fgMuted,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            fontFamily = monoFont,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    searchQuery = ""
+                                                    showSearchBar = false
+                                                    focusManager.clearFocus()
+                                                }
+                                                .padding(horizontal = 4.dp)
+                                        )
+                                        Text(
+                                            text = " |",
+                                            color = palette.fgMuted,
+                                            fontSize = 12.sp,
+                                            fontFamily = monoFont
+                                        )
+                                    }
+                                }
+
+                                if (statusBanner != null) {
+                                    AsciiHorizontalBorder(corner = "|")
+                                    AsciiBoxLeftRightRow(
+                                        left = statusBanner ?: "",
+                                        right = if (undoDeletedNote != null) "[↺ Undo]" else "[X Close]",
+                                        leftColor = palette.reminder,
+                                        rightColor = palette.project,
+                                        fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12),
+                                        boldRight = true,
+                                        onClick = {
+                                            if (undoDeletedNote != null) {
+                                                val (restoredName, restoredBody) = undoDeletedNote!!
+                                                undoDeletedNote = null
+                                                coroutineScope.launch(Dispatchers.IO) {
+                                                    val saved = storageRepo.saveNote(restoredName, restoredBody)
+                                                    withContext(Dispatchers.Main) { notes = saved }
+                                                }
+                                            }
+                                            statusBanner = null
+                                        }
+                                    )
+                                }
                                 AsciiHorizontalBorder()
 
                                 Spacer(modifier = Modifier.height(6.dp))
 
-                                // Google Keep-Style 2-Column Masonry Grid
+                                // Google Keep-Style Board (Up to half-screen height per note card!)
                                 Column(
                                     modifier = Modifier
                                         .weight(1f)
@@ -1176,10 +1524,10 @@ fun MainScreen(
                                         .verticalScroll(rememberScrollState())
                                         .padding(bottom = 58.dp)
                                 ) {
-                                    if (notes.isEmpty()) {
+                                    if (filteredNotes.isEmpty()) {
                                         AsciiTitledTopBorder(badgeText = "EMPTY", badgeColor = palette.fgMuted)
                                         AsciiBoxLeftRightRow(
-                                            left = "No Markdown (.md) notes yet",
+                                            left = if (searchQuery.isNotBlank()) "No notes matching \"$searchQuery\"" else "No Markdown (.md) notes yet",
                                             right = "[+ Add]",
                                             leftColor = palette.fgMuted,
                                             rightColor = palette.reminder,
@@ -1187,13 +1535,12 @@ fun MainScreen(
                                             onClick = { createAndOpenNewMarkdownNote() }
                                         )
                                         AsciiHorizontalBorder()
-                                    } else {
+                                    } else if (notesTwoColumnMode) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                                             verticalAlignment = Alignment.Top
                                         ) {
-                                            // Left Masonry Column
                                             Column(
                                                 modifier = Modifier.weight(1f),
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1201,7 +1548,9 @@ fun MainScreen(
                                                 leftColumnNotes.forEach { note ->
                                                     KeepAsciiMarkdownCard(
                                                         note = note,
-                                                        fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12),
+                                                        fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12),
+                                                        maxCharsPerLine = 20,
+                                                        maxHalfScreenVisualLines = 14,
                                                         onTapCard = { openNoteInPopup(note, startInEditMode = false) },
                                                         onToggleChecklistLine = { lineIdx ->
                                                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -1215,7 +1564,6 @@ fun MainScreen(
                                                 }
                                             }
 
-                                            // Right Masonry Column
                                             Column(
                                                 modifier = Modifier.weight(1f),
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1223,7 +1571,9 @@ fun MainScreen(
                                                 rightColumnNotes.forEach { note ->
                                                     KeepAsciiMarkdownCard(
                                                         note = note,
-                                                        fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12),
+                                                        fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12),
+                                                        maxCharsPerLine = 20,
+                                                        maxHalfScreenVisualLines = 14,
                                                         onTapCard = { openNoteInPopup(note, startInEditMode = false) },
                                                         onToggleChecklistLine = { lineIdx ->
                                                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -1237,11 +1587,34 @@ fun MainScreen(
                                                 }
                                             }
                                         }
+                                    } else {
+                                        Column(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            filteredNotes.forEach { note ->
+                                                KeepAsciiMarkdownCard(
+                                                    note = note,
+                                                    fontSizeSp = (fontScaleSp - 1).coerceAtLeast(13),
+                                                    maxCharsPerLine = 44,
+                                                    maxHalfScreenVisualLines = 14,
+                                                    onTapCard = { openNoteInPopup(note, startInEditMode = false) },
+                                                    onToggleChecklistLine = { lineIdx ->
+                                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        val toggledBody = toggleMarkdownCheckboxAtLine(note.bodyContent, lineIdx)
+                                                        coroutineScope.launch(Dispatchers.IO) {
+                                                            val saved = storageRepo.saveNote(note.filename, toggledBody)
+                                                            withContext(Dispatchers.Main) { notes = saved }
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
 
-                            // Uniform Pure-ASCII `[+ Add]` Box at Bottom-Right (Identical to Tasks tab!)
+                            // Single Uniform Pure-ASCII `[+ Add]` Box at Bottom-Right
                             Column(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
@@ -1416,27 +1789,11 @@ fun MainScreen(
         // POPUP 0: SHADED GOOGLE KEEP-STYLE MARKDOWN NOTE VIEWER / EDITOR
         // =====================================================================
         if (activeNotePopupFilename != null) {
+            val isNewNoteDraft = activeNotePopupFilename == NEW_NOTE_SENTINEL
             val currentNote = notes.firstOrNull { it.filename == activeNotePopupFilename }
             val displayLines = remember(noteDraftText, currentNote?.bodyContent, noteEditMode) {
                 if (noteEditMode) noteDraftText.lines()
                 else (currentNote?.bodyContent ?: noteDraftText).lines()
-            }
-
-            fun saveAndCloseNotePopup() {
-                if (noteDraftName.isNotBlank()) {
-                    val oldName = activeNotePopupFilename
-                    val safeNewName = NotesRepository.toHumanReadableFilename(noteDraftName, ".md")
-                    val textToSave = noteDraftText
-                    coroutineScope.launch(Dispatchers.IO) {
-                        if (oldName != null && oldName != safeNewName) {
-                            storageRepo.deleteNote(oldName)
-                        }
-                        val saved = storageRepo.saveNote(safeNewName, textToSave)
-                        withContext(Dispatchers.Main) { notes = saved }
-                    }
-                }
-                noteEditMode = false
-                activeNotePopupFilename = null
             }
 
             Box(
@@ -1446,7 +1803,7 @@ fun MainScreen(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
-                    ) { saveAndCloseNotePopup() }
+                    ) { commitNoteDraftAndClose(closePopup = true) }
                     .padding(horizontal = 14.dp, vertical = 24.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -1461,14 +1818,14 @@ fun MainScreen(
                         .padding(10.dp)
                 ) {
                     AsciiTitledTopBorder(
-                        badgeText = "/ MARKDOWN NOTE (.md)",
+                        badgeText = if (isNewNoteDraft) "+ NEW MARKDOWN NOTE (.md)" else "/ MARKDOWN NOTE (.md)",
                         badgeColor = palette.project,
                         rightBadgeText = "X Close",
                         rightBadgeColor = palette.fgMuted,
-                        onRightBadgeClick = { saveAndCloseNotePopup() }
+                        onRightBadgeClick = { commitNoteDraftAndClose(closePopup = true) }
                     )
 
-                    // Filename Row (`| # architecture.md |`)
+                    // Filename / Title Row (`| # filename.md |`)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -1480,24 +1837,38 @@ fun MainScreen(
                             fontSize = 12.sp,
                             fontFamily = monoFont
                         )
-                        BasicTextField(
-                            value = noteDraftName,
-                            onValueChange = {
-                                noteDraftName = it
-                                noteEditMode = true
-                            },
-                            singleLine = true,
-                            textStyle = TextStyle(
-                                fontFamily = monoFont,
-                                color = palette.project,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = fontScaleSp.sp
-                            ),
-                            cursorBrush = SolidColor(palette.project),
+                        Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(vertical = 6.dp)
-                        )
+                                .padding(vertical = 6.dp),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            if (noteDraftName.isEmpty()) {
+                                Text(
+                                    text = "title.md (optional — auto-named if blank)",
+                                    color = palette.fgMuted,
+                                    fontSize = (fontScaleSp - 2).coerceAtLeast(11).sp,
+                                    fontFamily = monoFont,
+                                    maxLines = 1
+                                )
+                            }
+                            BasicTextField(
+                                value = noteDraftName,
+                                onValueChange = {
+                                    noteDraftName = it
+                                    noteEditMode = true
+                                },
+                                singleLine = true,
+                                textStyle = TextStyle(
+                                    fontFamily = monoFont,
+                                    color = palette.project,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = fontScaleSp.sp
+                                ),
+                                cursorBrush = SolidColor(palette.project),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                         Text(
                             text = " |",
                             color = palette.fgMuted,
@@ -1560,21 +1931,35 @@ fun MainScreen(
                                 fontSize = 12.sp,
                                 fontFamily = monoFont
                             )
-                            BasicTextField(
-                                value = noteDraftText,
-                                onValueChange = { noteDraftText = it },
-                                textStyle = TextStyle(
-                                    fontFamily = monoFont,
-                                    color = palette.fg,
-                                    fontSize = fontScaleSp.sp,
-                                    lineHeight = (fontScaleSp + 4).sp
-                                ),
-                                cursorBrush = SolidColor(palette.project),
+                            Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .verticalScroll(rememberScrollState())
-                                    .padding(vertical = 6.dp)
-                            )
+                                    .padding(vertical = 6.dp),
+                                contentAlignment = Alignment.TopStart
+                            ) {
+                                if (noteDraftText.isEmpty()) {
+                                    Text(
+                                        text = "Write Markdown note (# Heading, - [ ] checklist, **bold**)...",
+                                        color = palette.fgMuted,
+                                        fontSize = (fontScaleSp - 1).coerceAtLeast(12).sp,
+                                        fontFamily = monoFont
+                                    )
+                                }
+                                BasicTextField(
+                                    value = noteDraftText,
+                                    onValueChange = { noteDraftText = it },
+                                    textStyle = TextStyle(
+                                        fontFamily = monoFont,
+                                        color = palette.fg,
+                                        fontSize = fontScaleSp.sp,
+                                        lineHeight = (fontScaleSp + 4).sp
+                                    ),
+                                    cursorBrush = SolidColor(palette.project),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .verticalScroll(rememberScrollState())
+                                )
+                            }
                             Text(
                                 text = " |",
                                 color = palette.fgMuted,
@@ -1597,10 +1982,12 @@ fun MainScreen(
                                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                         val toggled = toggleMarkdownCheckboxAtLine(noteDraftText, idx)
                                         noteDraftText = toggled
-                                        val safeName = NotesRepository.toHumanReadableFilename(noteDraftName, ".md")
-                                        coroutineScope.launch(Dispatchers.IO) {
-                                            val saved = storageRepo.saveNote(safeName, toggled)
-                                            withContext(Dispatchers.Main) { notes = saved }
+                                        val origin = activeNotePopupFilename
+                                        if (origin != null && origin != NEW_NOTE_SENTINEL) {
+                                            coroutineScope.launch(Dispatchers.IO) {
+                                                val saved = storageRepo.saveNote(origin, toggled)
+                                                withContext(Dispatchers.Main) { notes = saved }
+                                            }
                                         }
                                     },
                                     onTapLineToEdit = {
@@ -1613,7 +2000,7 @@ fun MainScreen(
 
                     AsciiHorizontalBorder(corner = "|")
 
-                    // Uniform Bottom Action Row
+                    // Uniform Bottom Action Row (Can delete any note, even the last one, with Undo!)
                     val popupActions: List<Triple<String, Color, () -> Unit>> = buildList {
                         add(
                             Triple<String, Color, () -> Unit>(
@@ -1621,13 +2008,7 @@ fun MainScreen(
                                 palette.project
                             ) {
                                 if (noteEditMode) {
-                                    val safeName = NotesRepository.toHumanReadableFilename(noteDraftName, ".md")
-                                    val textToSave = noteDraftText
-                                    noteEditMode = false
-                                    coroutineScope.launch(Dispatchers.IO) {
-                                        val saved = storageRepo.saveNote(safeName, textToSave)
-                                        withContext(Dispatchers.Main) { notes = saved }
-                                    }
+                                    commitNoteDraftAndClose(closePopup = false)
                                 } else {
                                     noteEditMode = true
                                 }
@@ -1636,15 +2017,18 @@ fun MainScreen(
                         )
                         add(
                             Triple<String, Color, () -> Unit>("[✓ Save]", palette.reminder) {
-                                saveAndCloseNotePopup()
+                                commitNoteDraftAndClose(closePopup = true)
                             }
                         )
-                        if (notes.size > 1) {
+                        if (!isNewNoteDraft) {
                             add(
                                 Triple<String, Color, () -> Unit>("[X Delete]", palette.priorityA) {
                                     val targetToDelete = activeNotePopupFilename ?: noteDraftName
+                                    val backupBody = currentNote?.bodyContent ?: noteDraftText
+                                    undoDeletedNote = targetToDelete to backupBody
                                     noteEditMode = false
                                     activeNotePopupFilename = null
+                                    statusBanner = "[X Delete] $targetToDelete"
                                     coroutineScope.launch(Dispatchers.IO) {
                                         val updated = storageRepo.deleteNote(targetToDelete)
                                         withContext(Dispatchers.Main) { notes = updated }
@@ -1655,7 +2039,7 @@ fun MainScreen(
                         }
                         add(
                             Triple<String, Color, () -> Unit>("[X Close]", palette.fgMuted) {
-                                saveAndCloseNotePopup()
+                                commitNoteDraftAndClose(closePopup = true)
                             }
                         )
                     }
@@ -1830,7 +2214,6 @@ fun MainScreen(
                             onRightBadgeClick = { editingTask = null }
                         )
 
-                        // Row 1: Editable Task Title Box
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
@@ -1860,7 +2243,6 @@ fun MainScreen(
                         }
                         AsciiHorizontalBorder(corner = "|")
 
-                        // Optimization #4: 1-Tap `+Project` & `@Context` Quick-Toggle Chips
                         if (quickTagChips.isNotEmpty()) {
                             AsciiBoxOptionRow(
                                 label = "[+@ Tag]",
@@ -1875,7 +2257,6 @@ fun MainScreen(
                             AsciiHorizontalBorder(corner = "|")
                         }
 
-                        // Row 2: 1-Tap Priority Selector (`None | (A) | (B) | (C)`)
                         val currentPriKey = parsedDraft.priority?.toString() ?: ""
                         AsciiBoxOptionRow(
                             label = "[!] Priority",
@@ -1901,7 +2282,6 @@ fun MainScreen(
                         )
                         AsciiHorizontalBorder(corner = "|")
 
-                        // Row 3: Date & Time + Relative Delta (Tapping opens the 3-Column Wheel Picker!)
                         AsciiBoxLeftRightRow(
                             left = "(L) $formattedDateLine",
                             right = "$deltaStr [zZ Snooze]",
@@ -1915,7 +2295,6 @@ fun MainScreen(
                         )
                         AsciiHorizontalBorder(corner = "|")
 
-                        // Row 4: Uniform Actions Bar: [zZ Snooze]  [# GCal]  [✓ Save]  [X Delete]
                         AsciiBoxActionRow(
                             actions = listOf(
                                 Triple("[zZ Snooze]", palette.project) {
@@ -2081,7 +2460,6 @@ fun MainScreen(
                             )
                         }
 
-                        // Optimization #4: 1-Tap `+Project` & `@Context` Chips in Add Popup
                         if (quickTagChips.isNotEmpty()) {
                             AsciiHorizontalBorder(corner = "|")
                             AsciiBoxOptionRow(
@@ -2097,7 +2475,6 @@ fun MainScreen(
                         }
 
                         AsciiHorizontalBorder(corner = "|")
-                        // 1-Tap Priority Selector (`None | (A) | (B) | (C)`)
                         val addPriKey = addTaskPriority?.toString() ?: ""
                         AsciiBoxOptionRow(
                             label = "[!] Priority",
@@ -2119,7 +2496,6 @@ fun MainScreen(
                         )
 
                         AsciiHorizontalBorder(corner = "|")
-                        // Date & Time Wheel Trigger Row
                         val previewDateText = if (parsePreview?.dueDate != null) {
                             "${parsePreview.dueDate} ${parsePreview.dueTime ?: ""}".trim()
                         } else {
@@ -2137,7 +2513,6 @@ fun MainScreen(
                         )
                         AsciiHorizontalBorder(corner = "|")
 
-                        // Uniform Bottom Action Bar: [X Close]   &   [+ Add]
                         AsciiBoxActionRow(
                             actions = listOf(
                                 Triple("[X Close]", palette.fgMuted) { showAddTaskPopup = false },
@@ -2154,28 +2529,32 @@ fun MainScreen(
 }
 
 /**
- * Google Keep-Style Compact ASCII Markdown Note Card for the 2-Column Staggered Board!
- * Supports:
- * - Markdown headings (`# H1`, `## H2`, `### H3`)
- * - Interactive Markdown checklists (`- [ ]` / `- [x]`) right on the card
- * - Bullet lists (`• item`), blockquotes (`> quote`), `**bold**`, `*italic*`, and `` `code` ``.
+ * Google Keep-Style Compact ASCII Markdown Note Card for the Staggered Board!
+ * - Word-wraps lines into chunks so every visual row has unbroken `| ... |` ASCII borders
+ *   and short/medium notes (like `beautiful.md`) are never cut off at 4 words!
+ * - Shows up to half the screen height (`maxHalfScreenVisualLines = 14`); only notes longer
+ *   than half the screen show `... (+N more lines — tap to view)` at the bottom.
  */
 @Composable
 private fun KeepAsciiMarkdownCard(
     note: NoteFile,
     fontSizeSp: Int,
+    maxCharsPerLine: Int = 20,
+    maxHalfScreenVisualLines: Int = 14,
     onTapCard: () -> Unit,
     onToggleChecklistLine: (Int) -> Unit
 ) {
     val palette = LocalTickPalette.current
-    val lines = remember(note.bodyContent) { note.bodyContent.lines() }
-    val nonEmptyIndexed = remember(lines) {
-        lines.mapIndexedNotNull { idx, raw ->
-            if (raw.isBlank()) null else idx to raw
-        }
+    val appFont = LocalTickFontFamily.current
+    val monoFont = FontFamily.Monospace
+
+    val allWrappedRows = remember(note.bodyContent, maxCharsPerLine) {
+        buildWrappedCardRows(note.bodyContent, maxCharsPerLine)
     }
-    val previewIndexed = remember(nonEmptyIndexed) { nonEmptyIndexed.take(6) }
-    val remainingCount = (nonEmptyIndexed.size - previewIndexed.size).coerceAtLeast(0)
+    val visibleRows = remember(allWrappedRows, maxHalfScreenVisualLines) {
+        allWrappedRows.take(maxHalfScreenVisualLines)
+    }
+    val hiddenRowCount = (allWrappedRows.size - visibleRows.size).coerceAtLeast(0)
 
     Column(
         modifier = Modifier
@@ -2188,27 +2567,94 @@ private fun KeepAsciiMarkdownCard(
             badgeColor = palette.project
         )
 
-        if (previewIndexed.isEmpty()) {
+        if (visibleRows.isEmpty()) {
             AsciiBoxBodyRow(
-                text = "(Empty Markdown note)",
+                text = "(Empty note)",
                 textColor = palette.fgMuted,
                 fontSizeSp = (fontSizeSp - 1).coerceAtLeast(11),
                 singleLine = true,
                 onClick = { onTapCard() }
             )
         } else {
-            previewIndexed.forEach { (originalIdx, rawLine) ->
-                MarkdownFormattedRow(
-                    rawLine = rawLine,
-                    fontSizeSp = fontSizeSp,
-                    singleLine = true,
-                    onTapCheckbox = { onToggleChecklistLine(originalIdx) },
-                    onTapLineToEdit = { onTapCard() }
-                )
+            visibleRows.forEach { row ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 1.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "| ",
+                        color = palette.fgMuted,
+                        fontSize = 12.sp,
+                        lineHeight = 15.sp,
+                        fontFamily = monoFont,
+                        softWrap = false,
+                        maxLines = 1
+                    )
+
+                    if (row.prefixToken.isNotEmpty()) {
+                        val prefixColor = when (row.prefixColorType) {
+                            "check_on" -> palette.reminder
+                            "check_off" -> palette.project
+                            "heading" -> palette.project
+                            "bullet" -> palette.priorityB
+                            "quote" -> palette.contextTag
+                            else -> palette.fgMuted
+                        }
+                        Text(
+                            text = row.prefixToken,
+                            color = prefixColor,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = fontSizeSp.sp,
+                            lineHeight = (fontSizeSp + 2).sp,
+                            fontFamily = monoFont,
+                            softWrap = false,
+                            maxLines = 1,
+                            modifier = if (row.isCheckboxFirstRow) {
+                                Modifier.clickable { onToggleChecklistLine(row.originalLineIdx) }
+                            } else {
+                                Modifier
+                            }
+                        )
+                    }
+
+                    val bodyBaseColor = when {
+                        row.isCheckedItem -> palette.fgMuted
+                        row.isHeading -> palette.project
+                        row.isQuote -> palette.contextTag
+                        else -> palette.fg
+                    }
+                    Text(
+                        text = renderInlineMarkdown(row.bodyText, palette, bodyBaseColor),
+                        fontSize = fontSizeSp.sp,
+                        lineHeight = (fontSizeSp + 2).sp,
+                        fontWeight = if (row.isHeading) FontWeight.Bold else FontWeight.Normal,
+                        fontStyle = if (row.isQuote) FontStyle.Italic else FontStyle.Normal,
+                        fontFamily = appFont,
+                        textDecoration = if (row.isCheckedItem) TextDecoration.LineThrough else TextDecoration.None,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onTapCard() }
+                    )
+
+                    Text(
+                        text = " |",
+                        color = palette.fgMuted,
+                        fontSize = 12.sp,
+                        lineHeight = 15.sp,
+                        fontFamily = monoFont,
+                        softWrap = false,
+                        maxLines = 1
+                    )
+                }
             }
-            if (remainingCount > 0) {
+
+            if (hiddenRowCount > 0) {
                 AsciiBoxBodyRow(
-                    text = "... (+$remainingCount more)",
+                    text = "... (+$hiddenRowCount more lines)",
                     textColor = palette.fgMuted,
                     fontSizeSp = (fontSizeSp - 2).coerceAtLeast(10),
                     singleLine = true,
@@ -2222,7 +2668,7 @@ private fun KeepAsciiMarkdownCard(
 }
 
 /**
- * Renders a single Markdown line inside an ASCII box (`| ... |`) with support for:
+ * Renders a single Markdown line inside the full Popup Note Viewer (`| ... |`) with support for:
  * - `# `, `## `, `### ` headings
  * - `- [ ]` and `- [x]` interactive checkboxes
  * - `- ` and `* ` bullets
@@ -2279,12 +2725,12 @@ private fun MarkdownFormattedRow(
                 )
                 Text(
                     text = renderInlineMarkdown(
-                        itemText,
+                        itemText.ifEmpty { " " },
                         palette,
                         if (isChecked) palette.fgMuted else palette.fg
                     ),
                     fontSize = fontSizeSp.sp,
-                    lineHeight = (fontSizeSp + 2).sp,
+                    lineHeight = (fontScaleSp(fontSizeSp) + 2).sp,
                     fontFamily = appFont,
                     textDecoration = if (isChecked) TextDecoration.LineThrough else TextDecoration.None,
                     maxLines = if (singleLine) 1 else Int.MAX_VALUE,
@@ -2384,6 +2830,8 @@ private fun MarkdownFormattedRow(
         )
     }
 }
+
+private fun fontScaleSp(sz: Int): Int = sz
 
 /**
  * 3-Line Task Card with Live Relative Countdown Badge:

@@ -48,24 +48,29 @@ class TickStorageRepository(private val context: Context) {
     private val notesRepo: NotesRepository get() = NotesRepository(notesDir)
 
     fun ensureInitialized() {
+        val alreadySeeded = prefs.getBoolean(KEY_INITIAL_SEED_DONE, false)
         if (!todoFile.exists()) {
-            val initialTodo = listOf(
-                "2026-11-02 check chocotat +chocotat @factory due:2026-11-02 duetime:09:00 rem:0m/n",
-                "(A) 2026-11-02 ship quarterly invoice +invoice @office due:2026-11-02 duetime:17:00 rem:0m/n",
-                "2026-11-02 review architecture notes +architecture @desk note:architecture.md"
-            ).joinToString("\n") + "\n"
+            val initialTodo = if (!alreadySeeded) {
+                listOf(
+                    "2026-11-02 check chocotat +chocotat @factory due:2026-11-02 duetime:09:00 rem:0m/n",
+                    "(A) 2026-11-02 ship quarterly invoice +invoice @office due:2026-11-02 duetime:17:00 rem:0m/n",
+                    "2026-11-02 review architecture notes +architecture @desk note:architecture.md"
+                ).joinToString("\n") + "\n"
+            } else {
+                ""
+            }
             AtomicFileWriter.writeAtomically(todoFile, initialTodo)
         }
         if (!doneFile.exists()) {
             AtomicFileWriter.writeAtomically(
                 doneFile,
-                "x 2026-11-01 2026-10-30 set up plain text folder on android +ops @phone\n"
+                if (!alreadySeeded) "x 2026-11-01 2026-10-30 set up plain text folder on android +ops @phone\n" else ""
             )
         }
         if (!rulesFile.exists()) {
             AtomicFileWriter.writeAtomically(rulesFile, TickRulesConfig.DEFAULT_RULES_FILE_CONTENT)
         }
-        if (notesDir.listFiles().isNullOrEmpty()) {
+        if (!alreadySeeded && notesDir.listFiles().isNullOrEmpty()) {
             notesRepo.saveNote(
                 "architecture.md",
                 "# tick.txt storage\n\n- **todo.txt** & **done.txt** follow the spec\n- `tick.rules.txt` holds smart-add rules\n- [x] Offline NLP inference\n- [ ] Sync SAF folder",
@@ -76,6 +81,9 @@ class TickStorageRepository(private val context: Context) {
                 "# Packing List\n\n- [x] Passport\n- [ ] USB-C cable\n- [ ] Notebook & pen\n> Ready for departure",
                 listOf("2026-11-05@07:30/n")
             )
+        }
+        if (!alreadySeeded) {
+            prefs.edit().putBoolean(KEY_INITIAL_SEED_DONE, true).apply()
         }
     }
 
@@ -441,5 +449,6 @@ class TickStorageRepository(private val context: Context) {
         private const val KEY_DATE_REM = "pref_date_rem"
         private const val KEY_SAF_URI = "pref_saf_uri"
         private const val KEY_AUTO_GCAL = "pref_auto_gcal"
+        private const val KEY_INITIAL_SEED_DONE = "pref_initial_seed_done"
     }
 }

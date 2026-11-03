@@ -18,10 +18,19 @@ import com.ticktxt.app.ui.theme.LocalTickPalette
 import com.ticktxt.app.ui.theme.ThemeMode
 import java.io.File
 
+private fun formatReadableStoragePath(rawPath: String): String {
+    val decoded = runCatching { Uri.decode(rawPath) }.getOrDefault(rawPath)
+    return when {
+        decoded.contains("/tree/") -> "SAF: " + decoded.substringAfter("/tree/")
+        else -> decoded
+    }
+}
+
 /**
  * Compact Settings screen with all options strictly inside the full-width ASCII boxes:
  * - System theme as default (`System | Dark | Light`)
- * - Removed redundant system-notification/audio toggle since all reminders & notifications are full-screen.
+ * - Pure Notification reminders (`! REMINDERS` with clean lead-time presets `0m | -5m | -15m | -30m | -1h`)
+ * - Single-line human-readable SAF storage path so side borders `|` never wrap or break.
  */
 @Composable
 fun SettingsScreen(
@@ -89,26 +98,26 @@ fun SettingsScreen(
             AsciiHorizontalBorder()
         }
 
-        // 2. +--[! REMINDERS & ALARM]----------------------------------+
+        // 2. +--[! REMINDERS]------------------------------------------+
         Column(modifier = Modifier.fillMaxWidth()) {
-            val normalizedRem = settings.defaultTimedReminder
+            val normalizedOffset = settings.defaultTimedReminder.substringBefore("/")
+            val selectedRemValue = "$normalizedOffset/n"
             AsciiTitledTopBorder(
-                badgeText = "! REMINDERS & ALARM",
+                badgeText = "! REMINDERS",
                 badgeColor = palette.priorityB,
-                rightBadgeText = "rem:$normalizedRem",
+                rightBadgeText = "rem:$normalizedOffset",
                 rightBadgeColor = palette.reminder
             )
             AsciiBoxOptionRow(
                 label = "Default",
                 options = listOf(
-                    "0m/a" to "0m Alarm",
-                    "0m/n" to "0m Notif",
-                    "-5m/a" to "-5m",
-                    "-15m/a" to "-15m",
-                    "-30m/a" to "-30m",
-                    "-1h/a" to "-1h"
+                    "0m/n" to "0m",
+                    "-5m/n" to "-5m",
+                    "-15m/n" to "-15m",
+                    "-30m/n" to "-30m",
+                    "-1h/n" to "-1h"
                 ),
-                selectedValue = normalizedRem,
+                selectedValue = selectedRemValue,
                 onSelect = { onUpdateSettings(settings.copy(defaultTimedReminder = it)) },
                 activeColor = palette.reminder,
                 fontSizeSp = baseSp
@@ -126,7 +135,7 @@ fun SettingsScreen(
                         }
                         Unit
                     },
-                    Triple<String, Color, () -> Unit>("[! Test Alert]", palette.priorityA) {
+                    Triple<String, Color, () -> Unit>("[! Test Notification]", palette.priorityA) {
                         onFireImmediateNotification()
                     }
                 ),
@@ -162,15 +171,19 @@ fun SettingsScreen(
 
         // 4. +--[/ PLAIN TEXT STORAGE]---------------------------------+
         Column(modifier = Modifier.fillMaxWidth()) {
+            val readablePath = remember(storageFolderPath) {
+                formatReadableStoragePath(storageFolderPath)
+            }
             AsciiTitledTopBorder(
                 badgeText = "/ PLAIN TEXT STORAGE",
                 badgeColor = palette.project,
                 rightBadgeText = "todo.txt"
             )
             AsciiBoxBodyRow(
-                text = storageFolderPath,
+                text = readablePath,
                 textColor = palette.fgMuted,
-                fontSizeSp = (baseSp - 2).coerceAtLeast(11)
+                fontSizeSp = (baseSp - 2).coerceAtLeast(11),
+                singleLine = true
             )
             AsciiBoxActionRow(
                 actions = listOf(

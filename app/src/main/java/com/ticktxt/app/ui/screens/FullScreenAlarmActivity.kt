@@ -1,13 +1,12 @@
 package com.ticktxt.app.ui.screens
 
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
-import android.os.VibrationEffect
-import android.os.Vibrator
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -275,6 +274,7 @@ fun AsciiBoxBodyRow(
     fontSizeSp: Int = 14,
     bold: Boolean = false,
     strikethrough: Boolean = false,
+    singleLine: Boolean = false,
     onClick: (() -> Unit)? = null
 ) {
     Row(
@@ -301,6 +301,9 @@ fun AsciiBoxBodyRow(
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
             fontFamily = LocalTickFontFamily.current,
             textDecoration = if (strikethrough) TextDecoration.LineThrough else TextDecoration.None,
+            maxLines = if (singleLine) 1 else Int.MAX_VALUE,
+            softWrap = !singleLine,
+            overflow = if (singleLine) TextOverflow.Ellipsis else TextOverflow.Clip,
             modifier = Modifier.weight(1f)
         )
         Text(
@@ -947,21 +950,10 @@ fun AsciiSnoozeWheelPopup(
 }
 
 object AlarmAudioController {
-    private var loudAlarmRingtone: Ringtone? = null
     private var notifRingtone: Ringtone? = null
-    private var vibrator: Vibrator? = null
-
-    fun triggerAlertAudio(context: Context, isNotificationMode: Boolean) {
-        if (isNotificationMode) {
-            playSystemNotificationBeepOnce(context)
-        } else {
-            startLoudAlarm(context)
-        }
-    }
 
     fun playSystemNotificationBeepOnce(context: Context) {
         runCatching {
-            stopLoudAlarmOnly()
             notifRingtone?.stop()
             val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             notifRingtone = RingtoneManager.getRingtone(context.applicationContext, uri)?.apply {
@@ -970,41 +962,8 @@ object AlarmAudioController {
         }
     }
 
-    private fun startLoudAlarm(context: Context) {
-        runCatching {
-            notifRingtone?.stop()
-            loudAlarmRingtone?.stop()
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            loudAlarmRingtone = RingtoneManager.getRingtone(context.applicationContext, uri)?.apply {
-                play()
-            }
-        }
-        runCatching {
-            @Suppress("DEPRECATION")
-            val vib = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-            vibrator = vib
-            if (vib != null && vib.hasVibrator()) {
-                val pattern = longArrayOf(0, 500, 300, 500, 300, 700)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vib.vibrate(VibrationEffect.createWaveform(pattern, 0))
-                } else {
-                    @Suppress("DEPRECATION")
-                    vib.vibrate(pattern, 0)
-                }
-            }
-        }
-    }
-
-    private fun stopLoudAlarmOnly() {
-        runCatching { loudAlarmRingtone?.stop() }
-        runCatching { vibrator?.cancel() }
-    }
-
     fun stopAll() {
-        runCatching { loudAlarmRingtone?.stop() }
         runCatching { notifRingtone?.stop() }
-        runCatching { vibrator?.cancel() }
     }
 }
 
@@ -1035,11 +994,8 @@ class FullScreenAlarmActivity : ComponentActivity() {
         val taskTitle = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE)
             ?: intent.getStringExtra("extra_task_title") ?: "scheduled task"
         val rawSpec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC)
-            ?: intent.getStringExtra("extra_raw_spec") ?: "0m/a"
-        val remType = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_TYPE)
-            ?: if (rawSpec.endsWith("/n")) "n" else "a"
-
-        AlarmAudioController.triggerAlertAudio(this, isNotificationMode = (remType == "n"))
+            ?: intent.getStringExtra("extra_raw_spec") ?: "0m/n"
+        val notifId = intent.getIntExtra("extra_notif_id", (reminderId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100))
 
         setContent {
             TickTxtTheme(
@@ -1058,22 +1014,18 @@ class FullScreenAlarmActivity : ComponentActivity() {
                             putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
                             putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
                             putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
-                            putExtra(ReminderScheduler.EXTRA_REMINDER_TYPE, remType)
+                            putExtra(ReminderScheduler.EXTRA_REMINDER_TYPE, "n")
                             putExtra(ReminderScheduler.EXTRA_SNOOZE_PRESET, presetSpec)
+                            putExtra("extra_notif_id", notifId)
                         }
                         sendBroadcast(snoozeIntent)
+                        cancelNotification(notifId)
                         finish()
                     },
                     onDismiss = {
+                        // Dismissing the full-screen window WITHOUT Done or Snooze leaves the notification
+                        // in the system notification shade until the user dismisses it from the shade as well!
                         AlarmAudioController.stopAll()
-                        val dismissIntent = Intent(this, AlarmBroadcastReceiver::class.java).apply {
-                            action = ReminderScheduler.ACTION_DISMISS_REMINDER
-                            putExtra(ReminderScheduler.EXTRA_REMINDER_ID, reminderId)
-                            putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
-                            putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
-                            putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
-                        }
-                        sendBroadcast(dismissIntent)
                         finish()
                     },
                     onMarkDone = {
@@ -1084,12 +1036,21 @@ class FullScreenAlarmActivity : ComponentActivity() {
                             putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
                             putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
                             putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
+                            putExtra("extra_notif_id", notifId)
                         }
                         sendBroadcast(doneIntent)
+                        cancelNotification(notifId)
                         finish()
                     }
                 )
             }
+        }
+    }
+
+    private fun cancelNotification(notifId: Int) {
+        runCatching {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(notifId)
         }
     }
 
@@ -1100,10 +1061,11 @@ class FullScreenAlarmActivity : ComponentActivity() {
 }
 
 /**
- * Clean 3-Option Full-Screen Notification / Alarm Surface:
- * Shows ONLY the ringing task and the 3 primary actions:
+ * Clean 3-Option Full-Screen Notification Surface:
+ * Shows ONLY the task and the 3 primary actions:
  *   `[✓ Done]`    `[zZ Snooze]`    `[X Dismiss]`
  * Clicking `[zZ Snooze]` opens the Screenshot-1 style `AsciiSnoozeWheelPopup` over a shaded background!
+ * Clicking `[X Dismiss]` closes the full-screen popup while keeping the reminder in the notification shade.
  */
 @Composable
 fun AsciiFullScreenAlarmSurface(
@@ -1128,7 +1090,7 @@ fun AsciiFullScreenAlarmSurface(
     val clockFormatted = remember(currentNow) {
         currentNow.format(DateTimeFormatter.ofPattern("h:mm a"))
     }
-    val modeBadge = if (rawSpec.endsWith("/n")) "NOTIFICATION" else "ALARM"
+    val cleanSpec = remember(rawSpec) { rawSpec.substringBefore("/") }
 
     Box(
         modifier = Modifier
@@ -1156,12 +1118,12 @@ fun AsciiFullScreenAlarmSurface(
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // Clean Full-Screen Task Box with ONLY the 3 actions: Done, Snooze, Dismiss
+            // Clean Full-Screen Notification Box with ONLY the 3 actions: Done, Snooze, Dismiss
             Column(modifier = Modifier.fillMaxWidth()) {
                 AsciiTitledTopBorder(
-                    badgeText = "! $modeBadge • $clockFormatted",
+                    badgeText = "! NOTIFICATION • $clockFormatted",
                     badgeColor = palette.priorityA,
-                    rightBadgeText = "rem:$rawSpec",
+                    rightBadgeText = "rem:$cleanSpec",
                     rightBadgeColor = palette.reminder
                 )
                 Spacer(modifier = Modifier.height(4.dp))

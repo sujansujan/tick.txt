@@ -2,6 +2,7 @@ package com.ticktxt.app.ui.screens
 
 import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -93,19 +94,18 @@ data class ActiveAlarmPayload(
     val reminderId: String,
     val taskId: String,
     val taskTitle: String,
-    val rawSpec: String
+    val rawSpec: String,
+    val notifId: Int = 100
 )
 
 /**
- * Main screen following a strict, uniform ASCII UX Design System + All 8 Optimizations:
- * 1. Incremental Diff-Based Alarm Scheduling (`scheduler.syncTaskSchedules`)
- * 2. Debounced Background Disk I/O (`Dispatchers.IO` + 300ms note typing debounce)
- * 3. Lifecycle-Aware Minute-Boundary Clock Tick
- * 4. 1-Tap `+Project` & `@Context` Quick-Insert Chips in Add & Edit Popups
- * 5. Pre-Compiled Regexes & Cached Border Strings
- * 6. VelocityTracker Fling / Momentum Physics on the 3-Column Snooze Wheel
- * 7. Auto-Focus Keyboard (`FocusRequester`) on `[+ Add]` & `[/ Search]` Open
- * 8. Inline Search / Filter Bar (`[/]`) across both Tasks and Notes (`PlainTextSearchIndex`).
+ * Main screen following a strict, uniform ASCII UX Design System:
+ * - Pure Full-Screen + Shade Notification mode (no Alarm mode anywhere; dismissing the full-screen
+ *   popup leaves the notification in the notification shade until dismissed from there as well)
+ * - Fixed Notes tab bottom border hugging content tightly + removed duplicate `[+ Add]` button
+ * - Clean task card top border (`+--[2026-11-04 09:30]---[+trial • 18 h. 4 m.]--+`) without `• NTF` clutter
+ * - Floating `[+ Add]` box uses `palette.bg` so no darker rectangle patch shows outside `+---------+`
+ * - Bottom navigation tabs use `[*Tasks (1)*]` / `[*Notes (2)*]` / `[*Settings*]` selection syntax.
  */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -197,12 +197,10 @@ fun MainScreen(
     // Popups with shaded background
     var editingTask by remember { mutableStateOf<TodoTask?>(null) }
     var editingTaskDraft by remember { mutableStateOf("") }
-    var editTaskAlertType by remember { mutableStateOf("a") } // "a" = Alarm, "n" = Notification
     var showEditSnoozeWheel by remember { mutableStateOf(false) }
 
     var showAddTaskPopup by remember { mutableStateOf(false) }
     var smartInput by remember { mutableStateOf("") }
-    var addTaskAlertType by remember { mutableStateOf("a") } // "a" = Alarm, "n" = Notification
     var addTaskPriority by remember { mutableStateOf<Char?>(null) }
     var disabledSpans by remember { mutableStateOf(setOf<String>()) }
     var showAddSnoozeWheel by remember { mutableStateOf(false) }
@@ -262,58 +260,71 @@ fun MainScreen(
         }
     }
 
-    fun triggerFullAlarmAndNotification(
+    fun cancelShadeNotification(notifId: Int) {
+        runCatching {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(notifId)
+        }
+    }
+
+    fun triggerFullNotification(
         taskTitle: String,
-        rawSpec: String = "0m/a",
-        taskId: String = "immediate",
-        typeCode: String = if (rawSpec.endsWith("/n")) "n" else "a"
+        rawSpec: String = "0m/n",
+        taskId: String = "immediate"
     ) {
-        AlarmAudioController.triggerAlertAudio(context, isNotificationMode = (typeCode == "n"))
+        val remId = "$taskId|$rawSpec"
+        val notifId = (remId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100)
+        // Fire through AlarmBroadcastReceiver so the persistent notification is posted to the shade AND shown full-screen
+        scheduler.fireImmediateNotification(
+            taskTitle = taskTitle,
+            rawSpec = rawSpec,
+            typeCode = "n",
+            taskId = taskId
+        )
         activeAlarmOverlay = ActiveAlarmPayload(
-            reminderId = "$taskId|$rawSpec",
+            reminderId = remId,
             taskId = taskId,
             taskTitle = taskTitle,
-            rawSpec = rawSpec
+            rawSpec = rawSpec,
+            notifId = notifId
         )
     }
 
-    fun scheduleExactDelayAlarm(task: TodoTask, delayMs: Long, rawSpec: String = "0m/a") {
+    fun scheduleExactDelayNotification(task: TodoTask, delayMs: Long, rawSpec: String = "0m/n") {
         val safeDelay = delayMs.coerceAtLeast(1_000L)
         val targetEpochMs = System.currentTimeMillis() + safeDelay
-        val typeCode = if (rawSpec.endsWith("/n")) "n" else "a"
         scheduler.scheduleRaw(
             reminderId = "${task.stableId}|$rawSpec",
             taskStableId = task.stableId,
             rawSpec = rawSpec,
             taskDescription = task.description,
-            typeCode = typeCode,
+            typeCode = "n",
             triggerEpochMs = targetEpochMs
         )
         if (safeDelay <= 7_200_000L) {
             coroutineScope.launch {
                 delay(safeDelay)
-                triggerFullAlarmAndNotification(
+                triggerFullNotification(
                     taskTitle = task.description,
                     rawSpec = rawSpec,
-                    taskId = task.stableId,
-                    typeCode = typeCode
+                    taskId = task.stableId
                 )
             }
         }
     }
 
-    // Optimization #1 & #2: Asynchronous Disk I/O + Incremental Diff-Based Alarm Scheduling
+    // Optimization #1 & #2: Asynchronous Disk I/O + Incremental Diff-Based Reminder Scheduling
     fun persistAndSchedule(
         updatedTasks: List<TodoTask>,
         exactDelayMillisForLastTask: Long? = null,
-        lastTaskRawSpec: String = "0m/a",
+        lastTaskRawSpec: String = "0m/n",
         syncLastToCalendar: Boolean = false
     ) {
         val numbered = updatedTasks.mapIndexed { idx, t -> t.copy(lineNumber = idx + 1) }
         tasks = numbered
 
         if (exactDelayMillisForLastTask != null && numbered.isNotEmpty()) {
-            scheduleExactDelayAlarm(numbered.last(), exactDelayMillisForLastTask, lastTaskRawSpec)
+            scheduleExactDelayNotification(numbered.last(), exactDelayMillisForLastTask, lastTaskRawSpec)
         }
 
         coroutineScope.launch(Dispatchers.IO) {
@@ -383,11 +394,12 @@ fun MainScreen(
                         statusBanner = msg
                     }
                     ReminderScheduler.ACTION_ALARM_FIRED_UI -> {
-                        val remId = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_ID) ?: "alarm"
+                        val remId = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_ID) ?: "notif"
                         val tId = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_ID) ?: "task"
-                        val spec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC) ?: "0m/a"
+                        val spec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC) ?: "0m/n"
                         val title = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE) ?: "scheduled task"
-                        activeAlarmOverlay = ActiveAlarmPayload(remId, tId, title, spec)
+                        val nId = intent.getIntExtra("extra_notif_id", (remId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100))
+                        activeAlarmOverlay = ActiveAlarmPayload(remId, tId, title, spec, nId)
                     }
                 }
             }
@@ -414,6 +426,7 @@ fun MainScreen(
             showEditSnoozeWheel -> showEditSnoozeWheel = false
             showAddSnoozeWheel -> showAddSnoozeWheel = false
             activeAlarmOverlay != null -> {
+                // Dismissing full-screen via Back leaves the notification in the notification shade!
                 AlarmAudioController.stopAll()
                 activeAlarmOverlay = null
             }
@@ -502,7 +515,7 @@ fun MainScreen(
             if (addTaskPriority != null && newTask.priority == null) {
                 newTask = newTask.copy(priority = addTaskPriority, isDirty = true)
             }
-            val chosenSpec = "0m/$addTaskAlertType"
+            val chosenSpec = "${settings.defaultTimedReminder.substringBefore("/")}/n"
             if (newTask.dueDate != null || newTask.reminderSpecs.isNotEmpty() || res.exactOffsetMillis != null) {
                 newTask = TodoParser.withReplacedMultiTag(newTask, "rem", listOf(chosenSpec))
             }
@@ -518,8 +531,7 @@ fun MainScreen(
             disabledSpans = emptySet()
             showAddTaskPopup = false
             focusManager.clearFocus()
-            val modeLabel = if (addTaskAlertType == "a") "ALM" else "NTF"
-            statusBanner = "[+ $modeLabel] ${newTask.description}"
+            statusBanner = "[+ Added] ${newTask.description}"
         }
     }
 
@@ -554,7 +566,7 @@ fun MainScreen(
     }
 
     // =========================================================================
-    // FULL-SCREEN 3-OPTION NOTIFICATION / ALARM OVERLAY
+    // FULL-SCREEN 3-OPTION NOTIFICATION OVERLAY
     // =========================================================================
     if (activeAlarmOverlay != null) {
         val alarm = activeAlarmOverlay!!
@@ -564,27 +576,27 @@ fun MainScreen(
             fontSizeSp = fontScaleSp,
             onSnoozeWithPreset = { presetSpec ->
                 AlarmAudioController.stopAll()
+                cancelShadeNotification(alarm.notifId)
                 val targetZdt = ReminderScheduleCalculator.computeSnoozeTarget(ZonedDateTime.now(), presetSpec)
                 val delayMs = (targetZdt.toInstant().toEpochMilli() - System.currentTimeMillis()).coerceAtLeast(1_000L)
                 val matchingTask = tasks.firstOrNull {
                     it.stableId == alarm.taskId || it.description.equals(alarm.taskTitle, ignoreCase = true)
                 }
                 if (matchingTask != null) {
-                    scheduleExactDelayAlarm(matchingTask, delayMs, alarm.rawSpec)
+                    scheduleExactDelayNotification(matchingTask, delayMs, alarm.rawSpec)
                 } else {
-                    val typeCode = if (alarm.rawSpec.endsWith("/n")) "n" else "a"
                     scheduler.scheduleRaw(
                         reminderId = alarm.reminderId,
                         taskStableId = alarm.taskId,
                         rawSpec = alarm.rawSpec,
                         taskDescription = alarm.taskTitle,
-                        typeCode = typeCode,
+                        typeCode = "n",
                         triggerEpochMs = targetZdt.toInstant().toEpochMilli()
                     )
                     if (delayMs <= 7_200_000L) {
                         coroutineScope.launch {
                             delay(delayMs)
-                            triggerFullAlarmAndNotification(alarm.taskTitle, alarm.rawSpec, alarm.taskId, typeCode)
+                            triggerFullNotification(alarm.taskTitle, alarm.rawSpec, alarm.taskId)
                         }
                     }
                 }
@@ -593,12 +605,15 @@ fun MainScreen(
                 activeAlarmOverlay = null
             },
             onDismiss = {
+                // Dismissing the full-screen window WITHOUT Done or Snooze leaves the notification
+                // in the system notification shade until dismissed from the shade!
                 AlarmAudioController.stopAll()
-                statusBanner = "[X Dismiss] Closed alert"
+                statusBanner = "[!] Kept in notification shade"
                 activeAlarmOverlay = null
             },
             onMarkDone = {
                 AlarmAudioController.stopAll()
+                cancelShadeNotification(alarm.notifId)
                 undoSnapshot = tasks
                 val nextList = tasks.map { t ->
                     if (!t.isCompleted && (t.stableId == alarm.taskId || t.description.equals(alarm.taskTitle, ignoreCase = true))) {
@@ -718,10 +733,10 @@ fun MainScreen(
                                         fontFamily = monoFont
                                     )
                                 }
-                                AsciiHorizontalBorder()
 
                                 // Optimization #8: Expandable Inline ASCII Search Row across Tasks & Notes
                                 if (showSearchBar) {
+                                    AsciiHorizontalBorder(corner = "|")
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -803,11 +818,11 @@ fun MainScreen(
                                             fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12)
                                         )
                                     }
-                                    AsciiHorizontalBorder()
                                 }
 
                                 // Status / Undo Row
                                 if (statusBanner != null) {
+                                    AsciiHorizontalBorder(corner = "|")
                                     AsciiBoxLeftRightRow(
                                         left = statusBanner ?: "",
                                         right = if (undoSnapshot != null) "[↺ Undo]" else "[X Close]",
@@ -823,8 +838,8 @@ fun MainScreen(
                                             statusBanner = null
                                         }
                                     )
-                                    AsciiHorizontalBorder()
                                 }
+                                AsciiHorizontalBorder()
 
                                 Spacer(modifier = Modifier.height(4.dp))
 
@@ -948,8 +963,6 @@ fun MainScreen(
                                                         onTapTask = {
                                                             editingTask = task
                                                             editingTaskDraft = TodoParser.serializeLine(task)
-                                                            val curRem = task.reminderSpecs.firstOrNull() ?: "0m/a"
-                                                            editTaskAlertType = if (curRem.endsWith("/n")) "n" else "a"
                                                         }
                                                     )
                                                 }
@@ -959,12 +972,12 @@ fun MainScreen(
                                 }
                             }
 
-                            // 3. Uniform Pure-ASCII `[+ Add]` Box at Bottom-Right (No CSS green border!)
+                            // 3. Uniform Pure-ASCII `[+ Add]` Box at Bottom-Right (Uses `palette.bg` so no dark patch!)
                             Column(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
                                     .padding(end = 12.dp, bottom = 6.dp)
-                                    .background(palette.bgElevated)
+                                    .background(palette.bg)
                                     .clickable { showAddTaskPopup = true },
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
@@ -995,11 +1008,12 @@ fun MainScreen(
                     }
 
                     1 -> {
-                        // TAB 1: NOTES (Uses the exact same `[+ Add]`, `[✓ Save]`, `[X Delete]` vocabulary!)
+                        // TAB 1: NOTES (Tightly wrapped bottom `+---+` border + no duplicate `[+ Add]` button)
                         val currentNote = notes.firstOrNull { it.filename == selectedNoteName } ?: notes.firstOrNull()
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 12.dp, vertical = 4.dp)
                         ) {
                             AsciiTitledTopBorder(
@@ -1064,21 +1078,6 @@ fun MainScreen(
                                             Unit
                                         }
                                     )
-                                    add(
-                                        Triple<String, Color, () -> Unit>("[+ Add]", palette.reminder) {
-                                            val name = "note-${notes.size + 1}.md"
-                                            val initialBody = "# $name\n\n"
-                                            selectedNoteName = name
-                                            noteDraftName = name
-                                            noteDraftText = initialBody
-                                            noteEditMode = true
-                                            coroutineScope.launch(Dispatchers.IO) {
-                                                val saved = storageRepo.saveNote(name, initialBody)
-                                                withContext(Dispatchers.Main) { notes = saved }
-                                            }
-                                            Unit
-                                        }
-                                    )
                                     if (notes.size > 1) {
                                         add(
                                             Triple<String, Color, () -> Unit>("[X Delete]", palette.priorityA) {
@@ -1105,8 +1104,8 @@ fun MainScreen(
                                 if (noteEditMode) {
                                     Row(
                                         modifier = Modifier
-                                            .weight(1f)
                                             .fillMaxWidth()
+                                            .heightIn(min = 180.dp)
                                     ) {
                                         Text(
                                             text = "| ",
@@ -1126,8 +1125,7 @@ fun MainScreen(
                                             cursorBrush = SolidColor(palette.project),
                                             modifier = Modifier
                                                 .weight(1f)
-                                                .fillMaxHeight()
-                                                .padding(vertical = 2.dp)
+                                                .padding(vertical = 4.dp)
                                         )
                                         Text(
                                             text = " |",
@@ -1139,9 +1137,7 @@ fun MainScreen(
                                 } else {
                                     Column(
                                         modifier = Modifier
-                                            .weight(1f)
                                             .fillMaxWidth()
-                                            .verticalScroll(rememberScrollState())
                                             .clickable {
                                                 noteDraftName = currentNote.filename
                                                 noteDraftText = currentNote.rawContent
@@ -1220,10 +1216,10 @@ fun MainScreen(
                                 }
                             },
                             onFireImmediateNotification = {
-                                triggerFullAlarmAndNotification(
+                                triggerFullNotification(
                                     taskTitle = "check chocotat +chocotat @factory",
-                                    rawSpec = "0m/a",
-                                    taskId = "test_alarm"
+                                    rawSpec = "0m/n",
+                                    taskId = "test_notif"
                                 )
                             }
                         )
@@ -1232,12 +1228,12 @@ fun MainScreen(
             }
 
             // =================================================================
-            // BOTTOM NAVIGATION TABS BOX (`[*] Tasks | [/] Notes | [#] Settings`)
+            // BOTTOM NAVIGATION TABS BOX (`[*Tasks (1)*] | Notes (2) | Settings`)
             // =================================================================
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(palette.bgElevated)
+                    .background(palette.bg)
                     .padding(horizontal = 12.dp, vertical = 4.dp)
             ) {
                 val openCount = tasks.count { !it.isBlankOrComment && !it.isCompleted }
@@ -1260,13 +1256,13 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         listOf(
-                            0 to "[*] Tasks ($openCount)",
-                            1 to "[/] Notes (${notes.size})",
-                            2 to "[#] Settings"
+                            0 to "Tasks ($openCount)",
+                            1 to "Notes (${notes.size})",
+                            2 to "Settings"
                         ).forEach { (tabIdx, tabLabel) ->
                             val selected = pagerState.currentPage == tabIdx
                             Text(
-                                text = if (selected) "*$tabLabel*" else tabLabel,
+                                text = if (selected) "[*$tabLabel*]" else tabLabel,
                                 color = if (selected) palette.project else palette.fg,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                                 fontSize = (fontScaleSp - 1).coerceAtLeast(13).sp,
@@ -1411,7 +1407,7 @@ fun MainScreen(
                     onConfirmDateTime = { chosenDate, chosenTime, delayMs ->
                         val dStr = chosenDate.toString()
                         val tStr = "%02d:%02d".format(chosenTime.hour, chosenTime.minute)
-                        val specStr = "0m/$editTaskAlertType"
+                        val specStr = "${settings.defaultTimedReminder.substringBefore("/")}/n"
                         var updated = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
                         updated = TodoParser.withUpdatedTag(updated, "due", dStr)
                         updated = TodoParser.withUpdatedTag(updated, "duetime", tStr)
@@ -1421,7 +1417,7 @@ fun MainScreen(
                         undoSnapshot = tasks
                         val updatedTasks = tasks.map { if (it.lineNumber == target.lineNumber) updated else it }
                         persistAndSchedule(updatedTasks)
-                        scheduleExactDelayAlarm(updated, delayMs, specStr)
+                        scheduleExactDelayNotification(updated, delayMs, specStr)
                         showEditSnoozeWheel = false
                         editingTask = null
                         statusBanner = "[zZ Snooze] $dStr $tStr"
@@ -1542,34 +1538,7 @@ fun MainScreen(
                         )
                         AsciiHorizontalBorder(corner = "|")
 
-                        // Row 4: Show as Notification vs Alarm (from Screenshot 1)
-                        AsciiBoxOptionRow(
-                            label = "[!] Show as",
-                            options = listOf(
-                                "n" to "Notification",
-                                "a" to "Alarm"
-                            ),
-                            selectedValue = editTaskAlertType,
-                            onSelect = { newType ->
-                                editTaskAlertType = newType
-                                var parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
-                                val updatedRems = if (parsed.reminderSpecs.isEmpty()) {
-                                    listOf("0m/$newType")
-                                } else {
-                                    parsed.reminderSpecs.map { spec ->
-                                        val base = spec.substringBefore("/")
-                                        "$base/$newType"
-                                    }
-                                }
-                                parsed = TodoParser.withReplacedMultiTag(parsed, "rem", updatedRems)
-                                editingTaskDraft = TodoParser.serializeLine(parsed)
-                            },
-                            activeColor = if (editTaskAlertType == "a") palette.priorityB else palette.reminder,
-                            fontSizeSp = fontScaleSp
-                        )
-                        AsciiHorizontalBorder(corner = "|")
-
-                        // Row 5: Uniform Actions Bar: [zZ Snooze]  [# GCal]  [✓ Save]  [X Delete]
+                        // Row 4: Uniform Actions Bar: [zZ Snooze]  [# GCal]  [✓ Save]  [X Delete]
                         AsciiBoxActionRow(
                             actions = listOf(
                                 Triple("[zZ Snooze]", palette.project) {
@@ -1790,20 +1759,6 @@ fun MainScreen(
                         )
                         AsciiHorizontalBorder(corner = "|")
 
-                        // Show as Notification vs Alarm (from Screenshot 1)
-                        AsciiBoxOptionRow(
-                            label = "[!] Show as",
-                            options = listOf(
-                                "n" to "Notification",
-                                "a" to "Alarm"
-                            ),
-                            selectedValue = addTaskAlertType,
-                            onSelect = { addTaskAlertType = it },
-                            activeColor = if (addTaskAlertType == "a") palette.priorityB else palette.reminder,
-                            fontSizeSp = fontScaleSp
-                        )
-                        AsciiHorizontalBorder(corner = "|")
-
                         // Uniform Bottom Action Bar: [X Close]   &   [+ Add]
                         AsciiBoxActionRow(
                             actions = listOf(
@@ -1821,10 +1776,10 @@ fun MainScreen(
 }
 
 /**
- * 3-Line Task Card with Live Relative Countdown Badge (like `32 d.` / `15 m.` / `-5 m.` in Screenshot 1):
- * Line 1: `+--[2026-11-02 09:00 • ALM]----------[+chocotat • 15 m.]--+`
- * Line 2: `| [ ] (A) check chocotat                                   |`
- * Line 3: `+----------------------------------------------------------+`
+ * 3-Line Task Card with Live Relative Countdown Badge (no `• NTF` or `• ALM` clutter!):
+ * Line 1: `+--[2026-11-04 09:30]-----------------[+trial • 18 h. 4 m.]--+`
+ * Line 2: `| [ ] (A) chocotat with color                                |`
+ * Line 3: `+------------------------------------------------------------+`
  */
 @Composable
 private fun UsableTaskCard(
@@ -1839,20 +1794,10 @@ private fun UsableTaskCard(
     val appFont = LocalTickFontFamily.current
     val monoFont = FontFamily.Monospace
 
-    val alertKind = task.reminderSpecs.firstOrNull()?.let {
-        if (it.endsWith("/n")) "NTF" else "ALM"
-    }
-
     val topDateAndTime = when {
         task.isCompleted -> "DONE ${task.completionDate ?: ""}".trim()
-        task.dueDate != null && task.dueTime != null -> {
-            val suffix = alertKind?.let { " • $it" } ?: ""
-            "${task.dueDate} ${task.dueTime}$suffix"
-        }
-        task.dueDate != null -> {
-            val suffix = alertKind?.let { " • $it" } ?: ""
-            "${task.dueDate}$suffix"
-        }
+        task.dueDate != null && task.dueTime != null -> "${task.dueDate} ${task.dueTime}"
+        task.dueDate != null -> "${task.dueDate}"
         else -> "OPEN"
     }
 

@@ -17,8 +17,8 @@ data class PersistedSettings(
     val fontMode: FontMode = FontMode.MONOSPACE,
     val fontSizeSp: Int = 16,
     val autoSyncGoogleCalendar: Boolean = true,
-    val defaultTimedReminder: String = "0m/a",
-    val defaultDateOnlyReminder: String = "09:00/a",
+    val defaultTimedReminder: String = "0m/n",
+    val defaultDateOnlyReminder: String = "09:00/n",
     val customSafUri: String? = null
 )
 
@@ -43,8 +43,8 @@ class TickStorageRepository(private val context: Context) {
     fun ensureInitialized() {
         if (!todoFile.exists()) {
             val initialTodo = listOf(
-                "2026-11-02 check chocotat +chocotat @factory due:2026-11-02 duetime:09:00 rem:0m/a",
-                "(A) 2026-11-02 ship quarterly invoice +invoice @office due:2026-11-02 duetime:17:00 rem:0m/a/svr",
+                "2026-11-02 check chocotat +chocotat @factory due:2026-11-02 duetime:09:00 rem:0m/n",
+                "(A) 2026-11-02 ship quarterly invoice +invoice @office due:2026-11-02 duetime:17:00 rem:0m/n",
                 "2026-11-02 review architecture notes +architecture @desk note:architecture.md"
             ).joinToString("\n") + "\n"
             AtomicFileWriter.writeAtomically(todoFile, initialTodo)
@@ -61,13 +61,13 @@ class TickStorageRepository(private val context: Context) {
         if (notesDir.listFiles().isNullOrEmpty()) {
             notesRepo.saveNote(
                 "architecture.md",
-                "# tick.txt storage notes\n\n- todo.txt and done.txt follow the official spec.\n- tick.rules.txt holds smart-add rules.\n- .tick/alarm-state.json stores active snoozes.",
-                listOf("2026-11-04@09:00/a")
+                "# tick.txt storage notes\n\n- todo.txt and done.txt follow the official spec.\n- tick.rules.txt holds smart-add rules.\n- .tick/reminder-state.json stores active snoozes.",
+                listOf("2026-11-04@09:00/n")
             )
             notesRepo.saveNote(
                 "packing-list.txt",
                 "passport\nusb-c cable\nnotebook and pen",
-                listOf("2026-11-05@07:30/a/svr")
+                listOf("2026-11-05@07:30/n")
             )
         }
     }
@@ -138,8 +138,10 @@ class TickStorageRepository(private val context: Context) {
         val fontStr = prefs.getString(KEY_FONT_MODE, FontMode.MONOSPACE.name) ?: FontMode.MONOSPACE.name
         val sizeSp = prefs.getInt(KEY_FONT_SIZE, 16)
         val autoSyncCal = prefs.getBoolean(KEY_AUTO_GCAL, true)
-        val timedRem = prefs.getString(KEY_TIMED_REM, "0m/a") ?: "0m/a"
-        val dateOnlyRem = prefs.getString(KEY_DATE_REM, "09:00/a") ?: "09:00/a"
+        val rawTimedRem = prefs.getString(KEY_TIMED_REM, "0m/n") ?: "0m/n"
+        val timedRem = "${rawTimedRem.substringBefore("/")}/n"
+        val rawDateRem = prefs.getString(KEY_DATE_REM, "09:00/n") ?: "09:00/n"
+        val dateOnlyRem = "${rawDateRem.substringBefore("/")}/n"
         val safUri = prefs.getString(KEY_SAF_URI, null)
 
         return PersistedSettings(

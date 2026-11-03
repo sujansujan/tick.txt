@@ -100,12 +100,9 @@ data class ActiveAlarmPayload(
 
 /**
  * Main screen following a strict, uniform ASCII UX Design System:
- * - Pure Full-Screen + Shade Notification mode (no Alarm mode anywhere; dismissing the full-screen
- *   popup leaves the notification in the notification shade until dismissed from there as well)
- * - Fixed Notes tab bottom border hugging content tightly + removed duplicate `[+ Add]` button
- * - Clean task card top border (`+--[2026-11-04 09:30]---[+trial • 18 h. 4 m.]--+`) without `• NTF` clutter
- * - Floating `[+ Add]` box uses `palette.bg` so no darker rectangle patch shows outside `+---------+`
- * - Bottom navigation tabs use `[*Tasks (1)*]` / `[*Notes (2)*]` / `[*Settings*]` selection syntax.
+ * - Selecting a folder via `[/ Folder]` (or tapping `[↺ Reload]`) immediately loads all existing
+ *   saves (`todo.txt`, `done.txt`, `tick.rules.txt`, and `notes/`) from that folder into the UI
+ *   and reschedules reminders.
  */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -274,7 +271,6 @@ fun MainScreen(
     ) {
         val remId = "$taskId|$rawSpec"
         val notifId = (remId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100)
-        // Fire through AlarmBroadcastReceiver so the persistent notification is posted to the shade AND shown full-screen
         scheduler.fireImmediateNotification(
             taskTitle = taskTitle,
             rawSpec = rawSpec,
@@ -349,6 +345,27 @@ fun MainScreen(
         }
     }
 
+    fun reloadAllFromSafOrDisk(customSafUriStr: String? = null, switchToTasksTab: Boolean = false) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val res = storageRepo.loadAllFromSafFolder(customSafUriStr)
+            scheduler.syncTaskSchedules(res.tasks, ZonedDateTime.now(), forceAll = true)
+            withContext(Dispatchers.Main) {
+                tasks = res.tasks
+                doneLines = res.doneLines
+                rulesText = res.rulesText
+                notes = res.notes
+                if (res.notes.isNotEmpty() && res.notes.none { it.filename == selectedNoteName }) {
+                    selectedNoteName = res.notes.first().filename
+                }
+                noteEditMode = false
+                statusBanner = "[/ Folder] Loaded ${res.tasks.size} task(s), ${res.notes.size} note(s)"
+                if (switchToTasksTab) {
+                    pagerState.animateScrollToPage(0)
+                }
+            }
+        }
+    }
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
@@ -371,11 +388,15 @@ fun MainScreen(
                 isAppResumed = true
                 currentNow = LocalDateTime.now()
                 coroutineScope.launch(Dispatchers.IO) {
-                    val loadedTasks = storageRepo.loadTasks()
-                    val loadedNotes = storageRepo.loadNotes()
+                    val res = storageRepo.loadAllFromSafFolder()
                     withContext(Dispatchers.Main) {
-                        tasks = loadedTasks
-                        notes = loadedNotes
+                        tasks = res.tasks
+                        doneLines = res.doneLines
+                        rulesText = res.rulesText
+                        notes = res.notes
+                        if (res.notes.isNotEmpty() && res.notes.none { it.filename == selectedNoteName }) {
+                            selectedNoteName = res.notes.first().filename
+                        }
                     }
                 }
             }
@@ -477,10 +498,10 @@ fun MainScreen(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
             }
-            onUpdateSettings(settings.copy(customSafUri = uri.toString()))
-            coroutineScope.launch(Dispatchers.IO) {
-                storageRepo.saveTasks(tasks)
-            }
+            val uriStr = uri.toString()
+            onUpdateSettings(settings.copy(customSafUri = uriStr))
+            // Immediately load existing tasks, done lines, rules, and notes from the chosen folder!
+            reloadAllFromSafOrDisk(customSafUriStr = uriStr, switchToTasksTab = true)
         }
     }
 
@@ -605,8 +626,6 @@ fun MainScreen(
                 activeAlarmOverlay = null
             },
             onDismiss = {
-                // Dismissing the full-screen window WITHOUT Done or Snooze leaves the notification
-                // in the system notification shade until dismissed from the shade!
                 AlarmAudioController.stopAll()
                 statusBanner = "[!] Kept in notification shade"
                 activeAlarmOverlay = null
@@ -1186,6 +1205,9 @@ fun MainScreen(
                                 Unit
                             },
                             onPickFolderWithSaf = { folderPickerLauncher.launch(null) },
+                            onReloadFromFolder = {
+                                reloadAllFromSafOrDisk(switchToTasksTab = false)
+                            },
                             onOpenSavedFileLocation = {
                                 val todoFile = storageRepo.todoFile
                                 val shareIntent = Intent(Intent.ACTION_SEND).apply {

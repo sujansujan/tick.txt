@@ -30,7 +30,7 @@ private fun formatReadableStoragePath(rawPath: String): String {
  * Compact Settings screen with all options strictly inside the full-width ASCII boxes:
  * - System theme as default (`System | Dark | Light`)
  * - Pure Notification reminders (`! REMINDERS` with clean lead-time presets `0m | -5m | -15m | -30m | -1h`)
- * - Single-line human-readable SAF storage path so side borders `|` never wrap or break.
+ * - Single-line human-readable SAF storage path + `[/ Folder]`, `[↺ Reload]`, `[> Share]`, `[✓ Archive]`.
  */
 @Composable
 fun SettingsScreen(
@@ -40,6 +40,7 @@ fun SettingsScreen(
     onUpdateSettings: (PersistedSettings) -> Unit,
     onSyncAllToGoogleCalendar: () -> Unit,
     onPickFolderWithSaf: () -> Unit,
+    onReloadFromFolder: () -> Unit = {},
     onOpenSavedFileLocation: () -> Unit,
     onArchiveCompletedTasks: () -> Unit,
     onFireImmediateNotification: () -> Unit
@@ -188,6 +189,7 @@ fun SettingsScreen(
             AsciiBoxActionRow(
                 actions = listOf(
                     Triple<String, Color, () -> Unit>("[/ Folder]", palette.project) { onPickFolderWithSaf() },
+                    Triple<String, Color, () -> Unit>("[↺ Reload]", palette.contextTag) { onReloadFromFolder() },
                     Triple<String, Color, () -> Unit>("[> Share]", palette.fg) { onOpenSavedFileLocation() },
                     Triple<String, Color, () -> Unit>("[✓ Archive]", palette.reminder) { onArchiveCompletedTasks() }
                 ),

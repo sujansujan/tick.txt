@@ -1018,6 +1018,7 @@ fun MainScreen(
                                         val saved = storageRepo.saveNote(name, initialBody)
                                         withContext(Dispatchers.Main) { notes = saved }
                                     }
+                                    Unit
                                 }
                             )
                             AsciiBoxOptionRow(
@@ -1041,9 +1042,9 @@ fun MainScreen(
                             )
                             if (currentNote != null) {
                                 AsciiHorizontalBorder(corner = "|")
-                                val noteActions = buildList {
+                                val noteActions: List<Triple<String, Color, () -> Unit>> = buildList {
                                     add(
-                                        Triple(
+                                        Triple<String, Color, () -> Unit>(
                                             if (noteEditMode) "[✓ Save]" else "[/ Edit]",
                                             if (noteEditMode) palette.reminder else palette.project
                                         ) {
@@ -1060,10 +1061,11 @@ fun MainScreen(
                                                 noteDraftText = currentNote.rawContent
                                                 noteEditMode = true
                                             }
+                                            Unit
                                         }
                                     )
                                     add(
-                                        Triple("[+ Add]", palette.reminder) {
+                                        Triple<String, Color, () -> Unit>("[+ Add]", palette.reminder) {
                                             val name = "note-${notes.size + 1}.md"
                                             val initialBody = "# $name\n\n"
                                             selectedNoteName = name
@@ -1074,11 +1076,12 @@ fun MainScreen(
                                                 val saved = storageRepo.saveNote(name, initialBody)
                                                 withContext(Dispatchers.Main) { notes = saved }
                                             }
+                                            Unit
                                         }
                                     )
                                     if (notes.size > 1) {
                                         add(
-                                            Triple("[X Delete]", palette.priorityA) {
+                                            Triple<String, Color, () -> Unit>("[X Delete]", palette.priorityA) {
                                                 val fname = currentNote.filename
                                                 noteEditMode = false
                                                 coroutineScope.launch(Dispatchers.IO) {
@@ -1088,6 +1091,7 @@ fun MainScreen(
                                                         selectedNoteName = updated.firstOrNull()?.filename ?: ""
                                                     }
                                                 }
+                                                Unit
                                             }
                                         )
                                     }
@@ -1183,6 +1187,7 @@ fun MainScreen(
                                         )
                                     )
                                 }
+                                Unit
                             },
                             onPickFolderWithSaf = { folderPickerLauncher.launch(null) },
                             onOpenSavedFileLocation = {
@@ -1200,6 +1205,7 @@ fun MainScreen(
                                         Intent.createChooser(shareIntent, "Share or open todo.txt")
                                     )
                                 }
+                                Unit
                             },
                             onArchiveCompletedTasks = {
                                 val completed = tasks.filter { it.isCompleted }

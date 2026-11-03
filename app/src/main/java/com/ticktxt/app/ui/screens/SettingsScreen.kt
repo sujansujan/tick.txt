@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.ticktxt.app.core.storage.PersistedSettings
@@ -114,7 +115,7 @@ fun SettingsScreen(
             )
             AsciiBoxActionRow(
                 actions = listOf(
-                    Triple("[! Overlay]", palette.project) {
+                    Triple<String, Color, () -> Unit>("[! Overlay]", palette.project) {
                         runCatching {
                             context.startActivity(
                                 Intent(
@@ -123,8 +124,9 @@ fun SettingsScreen(
                                 ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             )
                         }
+                        Unit
                     },
-                    Triple("[! Test Alert]", palette.priorityA) {
+                    Triple<String, Color, () -> Unit>("[! Test Alert]", palette.priorityA) {
                         onFireImmediateNotification()
                     }
                 ),
@@ -143,13 +145,13 @@ fun SettingsScreen(
             )
             AsciiBoxActionRow(
                 actions = listOf(
-                    Triple(
+                    Triple<String, Color, () -> Unit>(
                         if (settings.autoSyncGoogleCalendar) "[x] Auto-Sync" else "[ ] Auto-Sync",
                         if (settings.autoSyncGoogleCalendar) palette.reminder else palette.fgMuted
                     ) {
                         onUpdateSettings(settings.copy(autoSyncGoogleCalendar = !settings.autoSyncGoogleCalendar))
                     },
-                    Triple("[# GCal Sync]", palette.contextTag) {
+                    Triple<String, Color, () -> Unit>("[# GCal Sync]", palette.contextTag) {
                         onSyncAllToGoogleCalendar()
                     }
                 ),
@@ -172,9 +174,9 @@ fun SettingsScreen(
             )
             AsciiBoxActionRow(
                 actions = listOf(
-                    Triple("[/ Folder]", palette.project) { onPickFolderWithSaf() },
-                    Triple("[> Share]", palette.fg) { onOpenSavedFileLocation() },
-                    Triple("[✓ Archive]", palette.reminder) { onArchiveCompletedTasks() }
+                    Triple<String, Color, () -> Unit>("[/ Folder]", palette.project) { onPickFolderWithSaf() },
+                    Triple<String, Color, () -> Unit>("[> Share]", palette.fg) { onOpenSavedFileLocation() },
+                    Triple<String, Color, () -> Unit>("[✓ Archive]", palette.reminder) { onArchiveCompletedTasks() }
                 ),
                 fontSizeSp = (baseSp - 1).coerceAtLeast(12)
             )

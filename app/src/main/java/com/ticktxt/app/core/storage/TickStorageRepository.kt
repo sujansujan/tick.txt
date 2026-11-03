@@ -32,9 +32,7 @@ data class SafFolderLoadResult(
 
 /**
  * Single source-of-truth disk manager for `todo.txt`, `done.txt`, `tick.rules.txt`,
- * `notes/`, and `SharedPreferences` settings.
- * Supports full two-way loading and saving with any user-selected SAF folder (`OpenDocumentTree`),
- * including loading existing `todo.txt`, `done.txt`, `tick.rules.txt`, and `notes/` when a folder is selected.
+ * Markdown `notes/*.md`, and `SharedPreferences` settings.
  */
 class TickStorageRepository(private val context: Context) {
 
@@ -70,12 +68,12 @@ class TickStorageRepository(private val context: Context) {
         if (notesDir.listFiles().isNullOrEmpty()) {
             notesRepo.saveNote(
                 "architecture.md",
-                "# tick.txt storage notes\n\n- todo.txt and done.txt follow the official spec.\n- tick.rules.txt holds smart-add rules.\n- .tick/reminder-state.json stores active snoozes.",
+                "# tick.txt storage\n\n- **todo.txt** & **done.txt** follow the spec\n- `tick.rules.txt` holds smart-add rules\n- [x] Offline NLP inference\n- [ ] Sync SAF folder",
                 listOf("2026-11-04@09:00/n")
             )
             notesRepo.saveNote(
-                "packing-list.txt",
-                "passport\nusb-c cable\nnotebook and pen",
+                "packing-list.md",
+                "# Packing List\n\n- [x] Passport\n- [ ] USB-C cable\n- [ ] Notebook & pen\n> Ready for departure",
                 listOf("2026-11-05@07:30/n")
             )
         }
@@ -83,9 +81,7 @@ class TickStorageRepository(private val context: Context) {
 
     /**
      * Called immediately when the user selects a folder via `[/ Folder]` (or taps `[↺ Reload]`).
-     * Inspects the SAF folder for existing saves (`todo.txt`, `done.txt`, `tick.rules.txt`, and `notes/`
-     * or root `.md`/`.txt` notes) and loads them into the app without overwriting them.
-     * Only if the selected folder has no existing saves at all does it export current local files to the folder.
+     * Loads `todo.txt`, `done.txt`, `tick.rules.txt`, and Markdown `.md` notes from the SAF folder.
      */
     fun loadAllFromSafFolder(customUriStr: String? = null): SafFolderLoadResult {
         ensureInitialized()
@@ -112,7 +108,6 @@ class TickStorageRepository(private val context: Context) {
 
         val hasExistingSaves = (safTodoDoc != null) || (safDoneDoc != null) || (safRulesDoc != null) || safNotes.isNotEmpty()
 
-        // 1. Tasks (todo.txt)
         val loadedTasks: List<TodoTask> = if (safTodoDoc != null) {
             val rawTodo = readDocumentText(safTodoDoc) ?: ""
             runCatching { AtomicFileWriter.writeAtomically(todoFile, rawTodo) }
@@ -122,7 +117,6 @@ class TickStorageRepository(private val context: Context) {
             writeToSafFile("todo.txt", "text/plain", localRaw, safDir)
             TodoParser.parseFile(localRaw)
         } else {
-            // Folder had notes or done.txt but no todo.txt yet -> start with empty or existing todo.txt
             val rawTodo = readFromSafFile("todo.txt", safDir) ?: ""
             if (rawTodo.isNotEmpty()) {
                 runCatching { AtomicFileWriter.writeAtomically(todoFile, rawTodo) }
@@ -130,7 +124,6 @@ class TickStorageRepository(private val context: Context) {
             TodoParser.parseFile(rawTodo.ifEmpty { runCatching { todoFile.readText(Charsets.UTF_8) }.getOrDefault("") })
         }
 
-        // 2. Done tasks (done.txt)
         val loadedDoneLines: List<String> = if (safDoneDoc != null) {
             val rawDone = readDocumentText(safDoneDoc) ?: ""
             runCatching { AtomicFileWriter.writeAtomically(doneFile, rawDone) }
@@ -143,7 +136,6 @@ class TickStorageRepository(private val context: Context) {
             localDone.lines().filter { it.isNotBlank() }
         }
 
-        // 3. Smart-Add Rules (tick.rules.txt)
         val loadedRulesText: String = if (safRulesDoc != null) {
             val rawRules = readDocumentText(safRulesDoc) ?: TickRulesConfig.DEFAULT_RULES_FILE_CONTENT
             runCatching { AtomicFileWriter.writeAtomically(rulesFile, rawRules) }
@@ -157,14 +149,12 @@ class TickStorageRepository(private val context: Context) {
             localRules
         }
 
-        // 4. Notes (notes/*.md, notes/*.txt, or root *.md / *.txt notes)
         val loadedNotes: List<NoteFile> = if (safNotes.isNotEmpty()) {
-            // Replace local notesDir cache with the notes found in the selected SAF folder
             notesDir.listFiles()?.forEach { f ->
                 if (f.isFile) runCatching { f.delete() }
             }
             for ((fname, content) in safNotes) {
-                val safeName = NotesRepository.toHumanReadableFilename(fname)
+                val safeName = NotesRepository.toHumanReadableFilename(fname, ".md")
                 val target = File(notesDir, safeName)
                 AtomicFileWriter.writeAtomically(target, content.trimEnd() + "\n")
             }
@@ -246,7 +236,7 @@ class TickStorageRepository(private val context: Context) {
                     if (f.isFile) runCatching { f.delete() }
                 }
                 for ((fname, content) in safNotes) {
-                    val safeName = NotesRepository.toHumanReadableFilename(fname)
+                    val safeName = NotesRepository.toHumanReadableFilename(fname, ".md")
                     val target = File(notesDir, safeName)
                     AtomicFileWriter.writeAtomically(target, content.trimEnd() + "\n")
                 }
@@ -256,7 +246,7 @@ class TickStorageRepository(private val context: Context) {
     }
 
     fun saveNote(filename: String, rawContent: String): List<NoteFile> {
-        val safeName = NotesRepository.toHumanReadableFilename(filename)
+        val safeName = NotesRepository.toHumanReadableFilename(filename, ".md")
         val target = File(notesDir, safeName)
         val normalized = rawContent.trimEnd() + "\n"
         AtomicFileWriter.writeAtomically(target, normalized)
@@ -265,8 +255,11 @@ class TickStorageRepository(private val context: Context) {
     }
 
     fun deleteNote(filename: String): List<NoteFile> {
-        val target = File(notesDir, filename)
+        val safeName = NotesRepository.toHumanReadableFilename(filename, ".md")
+        val target = File(notesDir, safeName)
         if (target.exists()) target.delete()
+        File(notesDir, filename).takeIf { it.exists() }?.delete()
+        deleteNoteFromSaf(safeName)
         deleteNoteFromSaf(filename)
         return notesRepo.listNotes()
     }
@@ -310,8 +303,6 @@ class TickStorageRepository(private val context: Context) {
         return runCatching {
             val treeUri = Uri.parse(uriStr)
             val rootDir = DocumentFile.fromTreeUri(context, treeUri) ?: return null
-            // If the user picked a parent directory that contains a `tick` or `tick-txt` folder with `todo.txt`,
-            // while rootDir itself doesn't have `todo.txt`, resolve into that child folder automatically.
             if (findFileIgnoreCase(rootDir, "todo.txt") == null) {
                 val childTick = rootDir.listFiles().firstOrNull {
                     it.isDirectory && (it.name.equals("tick", ignoreCase = true) || it.name.equals("tick-txt", ignoreCase = true))
@@ -328,7 +319,6 @@ class TickStorageRepository(private val context: Context) {
         dir.findFile(filename)?.takeIf { it.isFile }?.let { return it }
         val all = dir.listFiles()
         all.firstOrNull { it.isFile && it.name.equals(filename, ignoreCase = true) }?.let { return it }
-        // Handle Android SAF duplicate naming e.g. "todo.txt.txt" or "todo (1).txt"
         val base = filename.substringBeforeLast('.')
         val ext = filename.substringAfterLast('.', "")
         return all.firstOrNull { f ->
@@ -383,7 +373,6 @@ class TickStorageRepository(private val context: Context) {
         val reservedNames = setOf("todo.txt", "tasks.txt", "done.txt", "tick.rules.txt", "alarm-state.json", "reminder-state.json")
         val collected = LinkedHashMap<String, String>()
 
-        // 1. Check `notes/` subdirectory inside the selected SAF folder
         val notesSubdir = findSubdirIgnoreCase(safDir, "notes")
         if (notesSubdir != null) {
             for (doc in notesSubdir.listFiles()) {
@@ -391,19 +380,22 @@ class TickStorageRepository(private val context: Context) {
                 if (doc.isFile && (name.endsWith(".md", ignoreCase = true) || name.endsWith(".txt", ignoreCase = true))) {
                     if (name.lowercase() !in reservedNames) {
                         val text = readDocumentText(doc) ?: continue
-                        collected[name] = text
+                        val mdName = NotesRepository.toHumanReadableFilename(name, ".md")
+                        collected[mdName] = text
                     }
                 }
             }
         }
 
-        // 2. Also check any `.md` or non-reserved `.txt` note files directly in the SAF root folder
         for (doc in safDir.listFiles()) {
             val name = doc.name ?: continue
-            if (doc.isFile && (name.endsWith(".md", ignoreCase = true) || name.endsWith(".txt", ignoreCase = true))) {
-                if (name.lowercase() !in reservedNames && name !in collected) {
-                    val text = readDocumentText(doc) ?: continue
-                    collected[name] = text
+            if (doc.isFile && name.endsWith(".md", ignoreCase = true)) {
+                if (name.lowercase() !in reservedNames) {
+                    val mdName = NotesRepository.toHumanReadableFilename(name, ".md")
+                    if (mdName !in collected) {
+                        val text = readDocumentText(doc) ?: continue
+                        collected[mdName] = text
+                    }
                 }
             }
         }
@@ -416,17 +408,16 @@ class TickStorageRepository(private val context: Context) {
         content: String,
         preResolvedDir: DocumentFile? = null
     ) {
+        val safeMdName = NotesRepository.toHumanReadableFilename(filename, ".md")
         val safDir = preResolvedDir ?: resolveSafDirectory(prefs.getString(KEY_SAF_URI, null)) ?: return
         runCatching {
-            // If the file already exists in the SAF root, update it there; otherwise write inside `notes/` subdir
-            val rootExisting = findFileIgnoreCase(safDir, filename)
+            val rootExisting = findFileIgnoreCase(safDir, safeMdName)
             if (rootExisting != null) {
                 writeDocumentText(rootExisting, content)
                 return
             }
             val notesSubdir = findSubdirIgnoreCase(safDir, "notes") ?: safDir.createDirectory("notes") ?: safDir
-            val mime = if (filename.endsWith(".md", ignoreCase = true)) "text/markdown" else "text/plain"
-            val doc = findFileIgnoreCase(notesSubdir, filename) ?: notesSubdir.createFile(mime, filename) ?: return
+            val doc = findFileIgnoreCase(notesSubdir, safeMdName) ?: notesSubdir.createFile("text/markdown", safeMdName) ?: return
             writeDocumentText(doc, content)
         }
     }

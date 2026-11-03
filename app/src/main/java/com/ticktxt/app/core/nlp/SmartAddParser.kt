@@ -8,18 +8,19 @@ import java.time.temporal.TemporalAdjusters
 import kotlin.math.roundToLong
 
 /**
- * Deterministic, 100% offline natural-language task & note parser.
+ * Deterministic, 100% offline 4-Layer natural-language task & note parser (zero LLM required):
  *
- * Supports:
- * - Granular relative time/date offsets (including decimals & compound units):
- *   "in 1 min", "in 2 hr", "in 1.5 hrs", "in 1 month", "in 1h 30m", "in 3 days", "in 2 weeks"
- * - Leading reminder phrasing:
- *   "remind me to check chocotat at factory in 1 min", "alarm me to ..."
- * - Grammatical & rule-based @context inference:
- *   "at factory" -> @factory, "at the office" -> @office, "on phone" -> @phone
- * - Grammatical & rule-based +project inference:
- *   Direct object / topic nouns after task verbs ("check chocotat" -> +chocotat)
- *   plus user-defined keyword rules in `tick.rules.txt`.
+ * Layer 1 — Grammatical Slot & Action-Verb Medium Parsing:
+ *   - `@Context` from spatial/medium prepositions ("at factory" -> @factory, "via slack" -> @slack,
+ *     "from pharmacy" -> @pharmacy, "in the warehouse" -> @warehouse) and action verbs
+ *     ("call/ring/text" -> @phone, "email/reply" -> @email, "buy/shop" -> @errands, "code/commit" -> @desk).
+ *   - `+Project` from transitive verb-object slots ("check chocotat" -> +chocotat, "inspect boiler" -> +boiler)
+ *     and topical prepositions ("about taxes" -> +taxes, "regarding Website" -> +website).
+ * Layer 2 — Historical Co-Occurrence Learning (`todo.txt` + `done.txt`):
+ *   - Uses `rules.keywordToProject` and `rules.wordToContext` enriched by `RulesEngine.withHistoricalLearning(...)`.
+ * Layer 3 — Known-Vocabulary Entity Matching:
+ *   - Matches words against `rules.knownProjects` and `rules.knownContexts` from existing tasks.
+ * Layer 4 — Interactive `[x]` Span Chips & Feedback Rule Learning (`tick.rules.txt`).
  */
 object SmartAddParser {
 
@@ -53,6 +54,27 @@ object SmartAddParser {
         "september", "october", "november", "december", "jan", "feb", "mar", "apr",
         "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "it", "me", "us", "them",
         "home", "office", "work", "shop", "store", "errands", "phone", "call"
+    )
+
+    private val VERB_TO_MEDIUM_CONTEXT = linkedMapOf(
+        "call" to "phone",
+        "ring" to "phone",
+        "dial" to "phone",
+        "text" to "phone",
+        "sms" to "phone",
+        "whatsapp" to "phone",
+        "email" to "email",
+        "mail" to "email",
+        "reply" to "email",
+        "buy" to "errands",
+        "purchase" to "errands",
+        "shop" to "errands",
+        "code" to "desk",
+        "refactor" to "desk",
+        "compile" to "desk",
+        "commit" to "desk",
+        "cook" to "kitchen",
+        "bake" to "kitchen"
     )
 
     fun parse(
@@ -354,7 +376,6 @@ object SmartAddParser {
             }
 
         // 5. Granular Relative Offsets ("in 1 min", "in 2 hr", "in 1.5 hrs", "in 1 month", "in 1h 30m", "in 3 days")
-        // Compound offset first: e.g. "in 1 hr 30 min" or "in 1h 15m"
         Regex("\\b(?:in|after)\\s+(\\d+)\\s*(?:hr?s?|hours?|h)\\s*(?:and\\s*)?(\\d+)\\s*(?:min(?:ute)?s?|m)\\b", RegexOption.IGNORE_CASE)
             .find(input)?.let { m ->
                 if (isUnprotected(m.range)) {
@@ -371,7 +392,6 @@ object SmartAddParser {
                 }
             }
 
-        // Single decimal or integer granular offset: "in 1 min", "in 1.5 hrs", "in 2 hr", "in 1 month", "in 3 days", "in 2 weeks", "in 1 year"
         Regex("\\b(?:in|after)\\s+(a|an|\\d+(?:\\.\\d+)?)\\s*(sec(?:ond)?s?|s|min(?:ute)?s?|m|hr?s?|hours?|h|days?|d|weeks?|wks?|w|months?|mos?|mo|years?|yrs?|y)\\b", RegexOption.IGNORE_CASE)
             .find(input)?.let { m ->
                 if (inferredDueDate == null && isUnprotected(m.range)) {
@@ -408,9 +428,6 @@ object SmartAddParser {
 
                     val dLocal = targetDt.toLocalDate()
                     val tLocal = LocalTime.of(targetDt.hour, targetDt.minute)
-                    val keepTime = isSubDayOrExact || hasLeadingReminderIntent || unit.startsWith("mo") || unit.startsWith("y")
-                    // Preserve compatibility with date-only "in 3 days" when no leading "remind me" was used,
-                    // while setting exact time for "in 1 min", "in 2 hr", "in 1.5 hrs", "in 1 month", or "remind me ... in X"
                     val assignTime = isSubDayOrExact || hasLeadingReminderIntent || unit.startsWith("mo") || unit.startsWith("y")
                     val resolvedLabel = if (assignTime) "due:$dLocal duetime:${"%02d:%02d".format(tLocal.hour, tLocal.minute)}" else "due:$dLocal"
 
@@ -577,11 +594,12 @@ object SmartAddParser {
                 }
             }
 
-        // 9. Context inference:
-        //    (a) User-configured phrase rules in `tick.rules.txt`
-        //    (b) Grammatical location/medium prepositions: "at <place>", "in the <place>", "on <medium>"
-        //        e.g. "at factory" -> @factory, "at clinic" -> @clinic, "in warehouse" -> @warehouse
+        // =====================================================================
+        // 9. 4-LAYER CONTEXT (@) INFERENCE
+        // =====================================================================
         val inferredContexts = mutableListOf<String>()
+
+        // Layer 9a: User-configured phrase rules in `tick.rules.txt`
         for ((phrase, ctxName) in rules.phraseToContext.entries.sortedByDescending { it.key.length }) {
             val rx = Regex("\\b${Regex.escape(phrase)}\\b", RegexOption.IGNORE_CASE)
             rx.findAll(input).forEach { m ->
@@ -596,15 +614,14 @@ object SmartAddParser {
             }
         }
 
-        // Grammatical location/context extraction for any novel place/context ("at factory" -> @factory)
-        Regex("\\b(?:at|in|on|from|via)\\s+(?:the\\s+|a\\s+|an\\s+|my\\s+|our\\s+)?([A-Za-z][A-Za-z0-9_-]{2,24})\\b", RegexOption.IGNORE_CASE)
+        // Layer 9b: Grammatical spatial/medium prepositions ("at factory" -> @factory, "via slack" -> @slack, "from clinic" -> @clinic)
+        Regex("\\b(?:at|in|on|from|via|over)\\s+(?:the\\s+|a\\s+|an\\s+|my\\s+|our\\s+)?([A-Za-z][A-Za-z0-9_-]{2,24})\\b", RegexOption.IGNORE_CASE)
             .findAll(input).forEach { m ->
                 if (isUnprotected(m.range)) {
                     val candidateCtx = m.groupValues[1].lowercase()
                     val prep = m.value.substringBefore(" ").lowercase()
-                    // Only treat "at <noun>" or "via <noun>" or "in the <noun>" as a context if not a time/stopword
-                    val hasArticle = Regex("\\b(?:at|in|on|from|via)\\s+(?:the|a|an|my|our)\\s+", RegexOption.IGNORE_CASE).containsMatchIn(m.value)
-                    if (candidateCtx !in NON_ENTITY_WORDS && (prep == "at" || prep == "via" || hasArticle)) {
+                    val hasArticle = Regex("\\b(?:at|in|on|from|via|over)\\s+(?:the|a|an|my|our)\\s+", RegexOption.IGNORE_CASE).containsMatchIn(m.value)
+                    if (candidateCtx !in NON_ENTITY_WORDS && (prep == "at" || prep == "via" || prep == "from" || prep == "over" || hasArticle)) {
                         if (addSpan(m.range.first, m.range.last + 1, SpanCategory.CONTEXT, "@$candidateCtx", stripFromTitle = true)) {
                             if (candidateCtx !in explicitContexts && candidateCtx !in inferredContexts) {
                                 inferredContexts.add(candidateCtx)
@@ -614,11 +631,45 @@ object SmartAddParser {
                 }
             }
 
-        // 10. Project inference:
-        //     (a) User-configured keyword rules in `tick.rules.txt`
-        //     (b) Grammatical verb-object / topic inference for any novel project noun
-        //         e.g. "check chocotat" -> +chocotat, "with <noun>" -> +<noun>, "for <noun>" -> +<noun>
+        // Layer 9c: Historical word->context co-occurrences & known @contexts from todo.txt / done.txt
+        for ((word, ctxName) in rules.wordToContext) {
+            val rx = Regex("\\b${Regex.escape(word)}\\b", RegexOption.IGNORE_CASE)
+            rx.find(input)?.let { m ->
+                if (!consumedMask[m.range.first] && ctxName !in explicitContexts && ctxName !in inferredContexts) {
+                    addSpan(m.range.first, m.range.last + 1, SpanCategory.CONTEXT, "@$ctxName", stripFromTitle = false)
+                    inferredContexts.add(ctxName)
+                }
+            }
+        }
+        for (knownCtx in rules.knownContexts) {
+            val rx = Regex("\\b${Regex.escape(knownCtx)}\\b", RegexOption.IGNORE_CASE)
+            rx.find(input)?.let { m ->
+                if (!consumedMask[m.range.first] && knownCtx !in explicitContexts && knownCtx !in inferredContexts) {
+                    addSpan(m.range.first, m.range.last + 1, SpanCategory.CONTEXT, "@$knownCtx", stripFromTitle = false)
+                    inferredContexts.add(knownCtx)
+                }
+            }
+        }
+
+        // Layer 9d: Action-verb medium inference (e.g. "call supplier" -> @phone, "buy milk" -> @errands)
+        if (explicitContexts.isEmpty() && inferredContexts.isEmpty()) {
+            for ((verb, mediumCtx) in VERB_TO_MEDIUM_CONTEXT) {
+                val rx = Regex("\\b$verb\\b", RegexOption.IGNORE_CASE)
+                rx.find(input)?.let { m ->
+                    if (!consumedMask[m.range.first] && inferredContexts.isEmpty()) {
+                        addSpan(m.range.first, m.range.last + 1, SpanCategory.CONTEXT, "@$mediumCtx", stripFromTitle = false)
+                        inferredContexts.add(mediumCtx)
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // 10. 4-LAYER PROJECT (+) INFERENCE
+        // =====================================================================
         val inferredProjects = mutableListOf<String>()
+
+        // Layer 10a: User-configured + historically learned keyword->project rules
         for ((keyword, projName) in rules.keywordToProject) {
             val rx = Regex("\\b${Regex.escape(keyword)}\\b", RegexOption.IGNORE_CASE)
             rx.find(input)?.let { m ->
@@ -631,10 +682,21 @@ object SmartAddParser {
             }
         }
 
+        // Layer 10b: Known +projects vocabulary matching from existing todo.txt / done.txt
+        for (knownProj in rules.knownProjects) {
+            val rx = Regex("\\b${Regex.escape(knownProj)}\\b", RegexOption.IGNORE_CASE)
+            rx.find(input)?.let { m ->
+                if (!consumedMask[m.range.first] && knownProj !in explicitProjects && knownProj !in inferredProjects) {
+                    addSpan(m.range.first, m.range.last + 1, SpanCategory.PROJECT, "+$knownProj", stripFromTitle = false)
+                    inferredProjects.add(knownProj)
+                }
+            }
+        }
+
+        // Layer 10c: Grammatical direct object after action verb OR topical prepositions ("about X", "regarding X")
         if (explicitProjects.isEmpty() && inferredProjects.isEmpty()) {
-            // Grammatical direct object after action verb: e.g. "check chocotat", "inspect boiler", "deploy backend"
             val verbObjRegex = Regex(
-                "\\b(?:check|review|fix|build|update|call|email|pay|buy|clean|finish|prepare|send|test|visit|inspect|audit|debug|deploy|write|plan|schedule|order|pickup|pick\\s+up|meet|talk\\s+to|work\\s+on|follow\\s+up\\s+on)\\s+(?:the\\s+|a\\s+|an\\s+|my\\s+|our\\s+|on\\s+|up\\s+)?([A-Za-z][A-Za-z0-9_-]{2,24})\\b",
+                "\\b(?:check|review|fix|build|update|call|email|pay|buy|clean|finish|prepare|send|test|visit|inspect|audit|debug|deploy|write|plan|schedule|order|pickup|pick\\s+up|meet|talk\\s+to|work\\s+on|follow\\s+up\\s+on|renew|ship|submit|draft|organize|research|design|repair|install|configure|backup|cancel|book)\\s+(?:the\\s+|a\\s+|an\\s+|my\\s+|our\\s+|on\\s+|up\\s+)?([A-Za-z][A-Za-z0-9_-]{2,24})\\b",
                 RegexOption.IGNORE_CASE
             )
             verbObjRegex.findAll(input).forEach { m ->
@@ -643,6 +705,22 @@ object SmartAddParser {
                 if (inferredProjects.isEmpty() && objWord !in NON_ENTITY_WORDS && objWord !in inferredContexts && isUnprotected(objRange)) {
                     if (addSpan(objRange.first, objRange.last + 1, SpanCategory.PROJECT, "+$objWord", stripFromTitle = false)) {
                         inferredProjects.add(objWord)
+                    }
+                }
+            }
+        }
+
+        if (explicitProjects.isEmpty() && inferredProjects.isEmpty()) {
+            val topicPrepRegex = Regex(
+                "\\b(?:about|regarding|for|concerning)\\s+(?:the\\s+|a\\s+|an\\s+|my\\s+|our\\s+)?([A-Za-z][A-Za-z0-9_-]{2,24})\\b",
+                RegexOption.IGNORE_CASE
+            )
+            topicPrepRegex.findAll(input).forEach { m ->
+                val topicWord = m.groupValues[1].lowercase()
+                val topicRange = m.groups[1]!!.range
+                if (inferredProjects.isEmpty() && topicWord !in NON_ENTITY_WORDS && topicWord !in inferredContexts && isUnprotected(topicRange)) {
+                    if (addSpan(topicRange.first, topicRange.last + 1, SpanCategory.PROJECT, "+$topicWord", stripFromTitle = false)) {
+                        inferredProjects.add(topicWord)
                     }
                 }
             }

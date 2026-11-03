@@ -6,8 +6,8 @@ import com.ticktxt.app.core.todotxt.TodoTask
 import java.io.File
 
 data class NoteFile(
-    val filename: String,       // e.g. "work-ideas.md" or "packing-list.txt"
-    val isMarkdown: Boolean,
+    val filename: String,       // Always ".md", e.g. "architecture.md" or "packing-list.md"
+    val isMarkdown: Boolean = true,
     val title: String,
     val rawContent: String,
     val bodyContent: String,
@@ -17,12 +17,11 @@ data class NoteFile(
 )
 
 /**
- * Manages individual plain-text (`.txt`) and Markdown (`.md`) notes in `notes/`.
+ * Manages Markdown-only (`.md`) notes in `notes/`.
  *
- * Metadata convention (100% plain-text friendly):
- * - In `.md` files, optional first-line HTML comment: `<!-- tick: rem:2026-11-03@09:00/n -->`
- * - In `.txt` files, optional first-line directive: `@tick rem:2026-11-03@09:00/n`
- * If a note has no reminders, zero metadata lines are added—the file is pure user text.
+ * Metadata convention (100% plain-text Markdown friendly):
+ * - Optional first-line HTML comment: `<!-- tick: rem:2026-11-03@09:00/n -->`
+ * - Automatically migrates any legacy `.txt` note in `notes/` to `.md`.
  */
 class NotesRepository(private val notesDir: File) {
 
@@ -31,8 +30,20 @@ class NotesRepository(private val notesDir: File) {
     }
 
     fun listNotes(): List<NoteFile> {
+        notesDir.listFiles { f -> f.isFile && f.name.endsWith(".txt", ignoreCase = true) }?.forEach { legacyTxt ->
+            runCatching {
+                val mdName = toHumanReadableFilename(legacyTxt.nameWithoutExtension, ".md")
+                val mdTarget = File(notesDir, mdName)
+                if (!mdTarget.exists()) {
+                    val content = legacyTxt.readText(Charsets.UTF_8)
+                    AtomicFileWriter.writeAtomically(mdTarget, content)
+                }
+                legacyTxt.delete()
+            }
+        }
+
         val files = notesDir.listFiles { f ->
-            f.isFile && (f.name.endsWith(".md", ignoreCase = true) || f.name.endsWith(".txt", ignoreCase = true))
+            f.isFile && f.name.endsWith(".md", ignoreCase = true)
         } ?: return emptyList()
 
         return files.map { parseNoteFile(it) }.sortedBy { it.filename.lowercase() }
@@ -48,16 +59,11 @@ class NotesRepository(private val notesDir: File) {
         bodyContent: String,
         reminderSpecs: List<String> = emptyList()
     ): NoteFile {
-        val safeName = toHumanReadableFilename(filename)
-        val isMd = safeName.endsWith(".md", ignoreCase = true)
+        val safeName = toHumanReadableFilename(filename, ".md")
         val fullContent = buildString {
             if (reminderSpecs.isNotEmpty()) {
                 val remTags = reminderSpecs.joinToString(" ") { "rem:$it" }
-                if (isMd) {
-                    appendLine("<!-- tick: $remTags -->")
-                } else {
-                    appendLine("@tick $remTags")
-                }
+                appendLine("<!-- tick: $remTags -->")
             }
             append(bodyContent.trimEnd())
             appendLine()
@@ -67,10 +73,6 @@ class NotesRepository(private val notesDir: File) {
         return parseNoteFile(target)
     }
 
-    /**
-     * Finds tasks in `todo.txt` that reference `note:<filename>` so the note view
-     * can display bi-directional backlinks.
-     */
     fun findTasksLinkingToNote(filename: String, allTasks: List<TodoTask>): List<TodoTask> {
         return allTasks.filter { task ->
             task.linkedNotes.any { it.equals(filename, ignoreCase = true) }
@@ -83,11 +85,11 @@ class NotesRepository(private val notesDir: File) {
         private val REM_TOKEN_REGEX = Regex("(?<=^|\\s)rem:([^\\s]+)")
 
         fun parseNoteContent(filename: String, raw: String, lastModifiedMs: Long = 0L): NoteFile {
-            val isMd = filename.endsWith(".md", ignoreCase = true)
+            val safeMdName = toHumanReadableFilename(filename, ".md")
             val lines = raw.lines()
             val firstLine = lines.firstOrNull()?.trim() ?: ""
 
-            val metaMatch = if (isMd) MD_META_REGEX.matchEntire(firstLine) else TXT_META_REGEX.matchEntire(firstLine)
+            val metaMatch = MD_META_REGEX.matchEntire(firstLine) ?: TXT_META_REGEX.matchEntire(firstLine)
             val reminders = mutableListOf<String>()
             val bodyLines: List<String>
 
@@ -106,14 +108,20 @@ class NotesRepository(private val notesDir: File) {
 
             val body = bodyLines.joinToString("\n").trimStart('\n')
             val firstHeading = bodyLines.firstOrNull { it.isNotBlank() }
+                ?.removePrefix("###")
+                ?.removePrefix("##")
                 ?.removePrefix("#")
+                ?.removePrefix("- [ ]")
+                ?.removePrefix("- [x]")
+                ?.removePrefix("- [X]")
+                ?.removePrefix("-")
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
-                ?: filename.substringBeforeLast('.')
+                ?: safeMdName.substringBeforeLast('.')
 
             return NoteFile(
-                filename = filename,
-                isMarkdown = isMd,
+                filename = safeMdName,
+                isMarkdown = true,
                 title = firstHeading,
                 rawContent = raw,
                 bodyContent = body,
@@ -123,16 +131,15 @@ class NotesRepository(private val notesDir: File) {
             )
         }
 
-        fun toHumanReadableFilename(input: String, defaultExt: String = ".md"): String {
+        fun toHumanReadableFilename(input: String, @Suppress("UNUSED_PARAMETER") defaultExt: String = ".md"): String {
             val trimmed = input.trim()
             val hasExt = trimmed.endsWith(".md", ignoreCase = true) || trimmed.endsWith(".txt", ignoreCase = true)
-            val ext = if (hasExt) "." + trimmed.substringAfterLast('.').lowercase() else defaultExt
             val base = if (hasExt) trimmed.substringBeforeLast('.') else trimmed
             val slug = base.lowercase()
                 .replace(Regex("[^a-z0-9]+"), "-")
                 .trim('-')
                 .ifEmpty { "note" }
-            return "$slug$ext"
+            return "$slug.md"
         }
     }
 }

@@ -11,6 +11,9 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -19,17 +22,22 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ticktxt.app.core.reminders.AlarmBroadcastReceiver
@@ -37,8 +45,10 @@ import com.ticktxt.app.core.reminders.ReminderScheduleCalculator
 import com.ticktxt.app.core.reminders.ReminderScheduler
 import com.ticktxt.app.core.reminders.SnoozeUnit
 import com.ticktxt.app.core.storage.TickStorageRepository
+import com.ticktxt.app.ui.theme.AmoledPalette
 import com.ticktxt.app.ui.theme.LocalTickFontFamily
 import com.ticktxt.app.ui.theme.LocalTickPalette
+import com.ticktxt.app.ui.theme.TickSemanticPalette
 import com.ticktxt.app.ui.theme.TickTxtTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -50,10 +60,48 @@ import java.time.LocalTime
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 // Optimization #5: Pre-allocated 240-char border string so recompositions never allocate strings
 private val DASH_FILL_240 = "-".repeat(240)
+
+/**
+ * Semantic syntax highlighter for task text on the AMOLED Full-Screen Notification
+ * and task cards: highlights `(A)`/`(B)`/`(C)` priorities, `+project` tags, `@context` tags,
+ * `due:`/`duetime:` dates, `rem:` specs, and `note:` links.
+ */
+fun buildSemanticTaskAnnotatedString(
+    rawTitle: String,
+    palette: TickSemanticPalette,
+    boldBase: Boolean = true
+): AnnotatedString {
+    return buildAnnotatedString {
+        val tokens = rawTitle.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        tokens.forEachIndexed { idx, token ->
+            if (idx > 0) append(" ")
+            when {
+                token == "(A)" -> withStyle(SpanStyle(color = palette.priorityA, fontWeight = FontWeight.Bold)) { append(token) }
+                token == "(B)" -> withStyle(SpanStyle(color = palette.priorityB, fontWeight = FontWeight.Bold)) { append(token) }
+                token == "(C)" -> withStyle(SpanStyle(color = palette.priorityC, fontWeight = FontWeight.Bold)) { append(token) }
+                token.startsWith("+") && token.length > 1 -> withStyle(SpanStyle(color = palette.project, fontWeight = FontWeight.Bold)) { append(token) }
+                token.startsWith("@") && token.length > 1 -> withStyle(SpanStyle(color = palette.contextTag, fontWeight = FontWeight.Bold)) { append(token) }
+                token.startsWith("due:", ignoreCase = true) || token.startsWith("duetime:", ignoreCase = true) ->
+                    withStyle(SpanStyle(color = palette.priorityB, fontWeight = FontWeight.Bold)) { append(token) }
+                token.startsWith("rem:", ignoreCase = true) ->
+                    withStyle(SpanStyle(color = palette.reminder, fontWeight = FontWeight.Bold)) { append(token) }
+                token.startsWith("note:", ignoreCase = true) ->
+                    withStyle(SpanStyle(color = palette.noteLink, fontWeight = FontWeight.Bold)) { append(token) }
+                else -> withStyle(
+                    SpanStyle(
+                        color = palette.fg,
+                        fontWeight = if (boldBase) FontWeight.Bold else FontWeight.Normal
+                    )
+                ) { append(token) }
+            }
+        }
+    }
+}
 
 /**
  * Uniform ASCII Design System Primitives (`+--[Title]---+`, `+---...---+`, `| ... |`).
@@ -302,6 +350,52 @@ fun AsciiBoxBodyRow(
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
             fontFamily = LocalTickFontFamily.current,
             textDecoration = if (strikethrough) TextDecoration.LineThrough else TextDecoration.None,
+            maxLines = if (singleLine) 1 else Int.MAX_VALUE,
+            softWrap = !singleLine,
+            overflow = if (singleLine) TextOverflow.Ellipsis else TextOverflow.Clip,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text = " |",
+            color = borderColor,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+fun AsciiBoxAnnotatedBodyRow(
+    annotatedText: AnnotatedString,
+    borderColor: Color = LocalTickPalette.current.fgMuted,
+    fontSizeSp: Int = 14,
+    singleLine: Boolean = false,
+    onClick: (() -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "| ",
+            color = borderColor,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        Text(
+            text = annotatedText,
+            fontSize = fontSizeSp.sp,
+            lineHeight = (fontSizeSp + 3).sp,
+            fontFamily = LocalTickFontFamily.current,
             maxLines = if (singleLine) 1 else Int.MAX_VALUE,
             softWrap = !singleLine,
             overflow = if (singleLine) TextOverflow.Ellipsis else TextOverflow.Clip,
@@ -600,7 +694,7 @@ fun AsciiSnoozeWheelPopup(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.78f))
+            .background(Color.Black.copy(alpha = 0.85f))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
@@ -625,11 +719,9 @@ fun AsciiSnoozeWheelPopup(
                 rightBadgeText = deltaLabel,
                 rightBadgeColor = palette.reminder
             )
-            AsciiBoxBodyRow(
-                text = taskTitle,
-                textColor = palette.reminder,
+            AsciiBoxAnnotatedBodyRow(
+                annotatedText = buildSemanticTaskAnnotatedString(taskTitle, palette, boldBase = true),
                 fontSizeSp = fontSizeSp,
-                bold = true,
                 singleLine = true
             )
             AsciiBoxLeftRightRow(
@@ -980,8 +1072,11 @@ object AlarmAudioController {
 
 class FullScreenAlarmActivity : ComponentActivity() {
 
+    private var activeNotifId: Int = -1
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        isCurrentlyVisible.set(true)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
@@ -995,18 +1090,30 @@ class FullScreenAlarmActivity : ComponentActivity() {
                 WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
         )
 
+        renderFromIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        isCurrentlyVisible.set(true)
+        renderFromIntent(intent)
+    }
+
+    private fun renderFromIntent(currentIntent: Intent) {
         val repo = TickStorageRepository(this)
         val settings = repo.loadSettings()
 
-        val reminderId = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_ID)
-            ?: intent.getStringExtra("extra_reminder_id") ?: "alarm_id"
-        val taskId = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_ID)
-            ?: intent.getStringExtra("extra_task_id") ?: "task_id"
-        val taskTitle = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE)
-            ?: intent.getStringExtra("extra_task_title") ?: "scheduled task"
-        val rawSpec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC)
-            ?: intent.getStringExtra("extra_raw_spec") ?: "0m/n"
-        val notifId = intent.getIntExtra("extra_notif_id", (reminderId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100))
+        val reminderId = currentIntent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_ID)
+            ?: currentIntent.getStringExtra("extra_reminder_id") ?: "alarm_id"
+        val taskId = currentIntent.getStringExtra(ReminderScheduler.EXTRA_TASK_ID)
+            ?: currentIntent.getStringExtra("extra_task_id") ?: "task_id"
+        val taskTitle = currentIntent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE)
+            ?: currentIntent.getStringExtra("extra_task_title") ?: "scheduled task"
+        val rawSpec = currentIntent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC)
+            ?: currentIntent.getStringExtra("extra_raw_spec") ?: "0m/n"
+        val notifId = currentIntent.getIntExtra("extra_notif_id", (reminderId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100))
+        activeNotifId = notifId
 
         // Ensure the notification tray is empty while the Full-Screen Notification is open!
         cancelNotification(notifId)
@@ -1075,6 +1182,23 @@ class FullScreenAlarmActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        isCurrentlyVisible.set(true)
+        if (activeNotifId > 0) cancelNotification(activeNotifId)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isCurrentlyVisible.set(true)
+        if (activeNotifId > 0) cancelNotification(activeNotifId)
+    }
+
+    override fun onStop() {
+        isCurrentlyVisible.set(false)
+        super.onStop()
+    }
+
     private fun cancelNotification(notifId: Int) {
         runCatching {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -1083,17 +1207,27 @@ class FullScreenAlarmActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        isCurrentlyVisible.set(false)
         AlarmAudioController.stopAll()
         super.onDestroy()
+    }
+
+    companion object {
+        /**
+         * Tracks whether `FullScreenAlarmActivity` is currently visible on screen.
+         * Used by `AlarmBroadcastReceiver` to verify lock-screen activity launch within 320ms.
+         */
+        val isCurrentlyVisible = AtomicBoolean(false)
     }
 }
 
 /**
- * Clean 3-Option Full-Screen Notification Surface:
- * Shows ONLY the task and the 3 primary actions:
- *   `[✓ Done]`    `[zZ Snooze]`    `[X Dismiss]`
- * Clicking `[zZ Snooze]` opens the `AsciiSnoozeWheelPopup` (`isSnoozeMode = true`).
- * Clicking `[X Dismiss]` closes the full-screen window and places the reminder into the notification tray.
+ * Always-AMOLED (`#000000`) Burn-In-Protected Full-Screen Notification Surface:
+ * - Always renders on a pure `#000000` pitch-black AMOLED canvas (`AmoledPalette`) regardless of app theme.
+ * - Moves smoothly across 5 vertical screen zones every 2 minutes + subtle 8-point pixel drift
+ *   every 45 seconds so no ASCII line or character stays on the same physical OLED subpixels.
+ * - Highlights `(A)`/`(B)`/`(C)`, `+project`, `@context`, and `due:` tokens semantically.
+ * - Shows the 3 primary actions: `[✓ Done]`  `[zZ Snooze]`  `[X Dismiss]`.
  */
 @Composable
 fun AsciiFullScreenAlarmSurface(
@@ -1104,96 +1238,133 @@ fun AsciiFullScreenAlarmSurface(
     onDismiss: () -> Unit,
     onMarkDone: () -> Unit
 ) {
-    val palette = LocalTickPalette.current
-    var showSnoozeWheelPopup by remember { mutableStateOf(false) }
-    var currentNow by remember { mutableStateOf(ZonedDateTime.now()) }
+    CompositionLocalProvider(LocalTickPalette provides AmoledPalette) {
+        val palette = LocalTickPalette.current
+        var showSnoozeWheelPopup by remember { mutableStateOf(false) }
+        var currentNow by remember { mutableStateOf(ZonedDateTime.now()) }
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(1000L)
-            currentNow = ZonedDateTime.now()
-        }
-    }
+        // OLED Burn-In Prevention State:
+        // - `orbitZoneIdx` cycles every 2 minutes (120s) across 5 vertical screen regions
+        // - `pixelShiftIdx` cycles every 45 seconds across 8 horizontal/vertical pixel offsets
+        var elapsedSeconds by remember { mutableIntStateOf(0) }
 
-    val clockFormatted = remember(currentNow) {
-        currentNow.format(DateTimeFormatter.ofPattern("h:mm a"))
-    }
-    val cleanSpec = remember(rawSpec) { rawSpec.substringBefore("/") }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(palette.bg)
-            .statusBarsPadding()
-            .navigationBarsPadding()
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text(
-                text = PlainTextSportsAscii.ALARM_BELL_ART,
-                color = palette.priorityB,
-                fontSize = 13.sp,
-                lineHeight = 16.sp,
-                fontFamily = FontFamily.Monospace,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(18.dp))
-
-            Column(modifier = Modifier.fillMaxWidth()) {
-                AsciiTitledTopBorder(
-                    badgeText = "! NOTIFICATION • $clockFormatted",
-                    badgeColor = palette.priorityA,
-                    rightBadgeText = "rem:$cleanSpec",
-                    rightBadgeColor = palette.reminder
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                AsciiBoxBodyRow(
-                    text = taskTitle,
-                    textColor = palette.fg,
-                    fontSizeSp = fontSizeSp + 2,
-                    bold = true
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                AsciiHorizontalBorder(corner = "|")
-                AsciiBoxActionRow(
-                    actions = listOf(
-                        Triple("[✓ Done]", palette.reminder) { onMarkDone() },
-                        Triple("[zZ Snooze]", palette.project) { showSnoozeWheelPopup = true },
-                        Triple("[X Dismiss]", palette.fgMuted) { onDismiss() }
-                    ),
-                    fontSizeSp = fontSizeSp
-                )
-                AsciiHorizontalBorder()
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(1000L)
+                currentNow = ZonedDateTime.now()
+                elapsedSeconds += 1
             }
         }
 
-        if (showSnoozeWheelPopup) {
-            AsciiSnoozeWheelPopup(
-                taskTitle = taskTitle,
-                initialDate = LocalDate.now(),
-                initialTime = LocalTime.now().withSecond(0).withNano(0),
-                fontSizeSp = fontScaleSp(fontSizeSp),
-                isSnoozeMode = true,
-                confirmLabel = "[zZ Snooze]",
-                onDismiss = { showSnoozeWheelPopup = false },
-                onConfirmDateTime = { _, _, delayMs ->
-                    showSnoozeWheelPopup = false
-                    val totalSecs = (delayMs / 1000L).coerceAtLeast(1L)
-                    val presetStr = if (totalSecs < 60L || totalSecs % 60L != 0L) {
-                        "${totalSecs}s"
-                    } else {
-                        "${totalSecs / 60L}m"
-                    }
-                    onSnoozeWithPreset(presetStr)
+        val verticalZoneBiases = remember { floatArrayOf(0.0f, -0.42f, 0.42f, -0.74f, 0.74f) }
+        val driftOffsetsX = remember { intArrayOf(0, -6, 5, -4, 6, -5, 4, -3) }
+        val driftOffsetsY = remember { intArrayOf(0, -7, 6, -5, 8, -6, 5, -4) }
+
+        val orbitZoneIdx = (elapsedSeconds / 120) % verticalZoneBiases.size
+        val pixelShiftIdx = (elapsedSeconds / 45) % driftOffsetsX.size
+
+        val animatedVerticalBias by animateFloatAsState(
+            targetValue = verticalZoneBiases[orbitZoneIdx],
+            animationSpec = tween(durationMillis = 1800),
+            label = "amoledVerticalBias"
+        )
+        val animatedDx by animateDpAsState(
+            targetValue = driftOffsetsX[pixelShiftIdx].dp,
+            animationSpec = tween(durationMillis = 1800),
+            label = "amoledDriftX"
+        )
+        val animatedDy by animateDpAsState(
+            targetValue = driftOffsetsY[pixelShiftIdx].dp,
+            animationSpec = tween(durationMillis = 1800),
+            label = "amoledDriftY"
+        )
+
+        val clockFormatted = remember(currentNow) {
+            currentNow.format(DateTimeFormatter.ofPattern("h:mm a"))
+        }
+        val cleanSpec = remember(rawSpec) { rawSpec.substringBefore("/") }
+        val semanticTaskText = remember(taskTitle, palette) {
+            buildSemanticTaskAnnotatedString(taskTitle, palette, boldBase = true)
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .statusBarsPadding()
+                .navigationBarsPadding()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(BiasAlignment(0f, animatedVerticalBias))
+                    .offset(x = animatedDx, y = animatedDy)
+                    .padding(horizontal = 18.dp, vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = PlainTextSportsAscii.ALARM_BELL_ART,
+                    color = palette.priorityB.copy(alpha = 0.88f),
+                    fontSize = 13.sp,
+                    lineHeight = 16.sp,
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black)
+                ) {
+                    AsciiTitledTopBorder(
+                        badgeText = "! NOTIFICATION • $clockFormatted",
+                        badgeColor = palette.priorityA,
+                        rightBadgeText = "rem:$cleanSpec",
+                        rightBadgeColor = palette.reminder
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    AsciiBoxAnnotatedBodyRow(
+                        annotatedText = semanticTaskText,
+                        fontSizeSp = fontSizeSp + 2
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    AsciiHorizontalBorder(corner = "|")
+                    AsciiBoxActionRow(
+                        actions = listOf(
+                            Triple("[✓ Done]", palette.reminder) { onMarkDone() },
+                            Triple("[zZ Snooze]", palette.project) { showSnoozeWheelPopup = true },
+                            Triple("[X Dismiss]", palette.fgMuted) { onDismiss() }
+                        ),
+                        fontSizeSp = fontSizeSp
+                    )
+                    AsciiHorizontalBorder()
                 }
-            )
+            }
+
+            if (showSnoozeWheelPopup) {
+                AsciiSnoozeWheelPopup(
+                    taskTitle = taskTitle,
+                    initialDate = LocalDate.now(),
+                    initialTime = LocalTime.now().withSecond(0).withNano(0),
+                    fontSizeSp = fontScaleSp(fontSizeSp),
+                    isSnoozeMode = true,
+                    confirmLabel = "[zZ Snooze]",
+                    onDismiss = { showSnoozeWheelPopup = false },
+                    onConfirmDateTime = { _, _, delayMs ->
+                        showSnoozeWheelPopup = false
+                        val totalSecs = (delayMs / 1000L).coerceAtLeast(1L)
+                        val presetStr = if (totalSecs < 60L || totalSecs % 60L != 0L) {
+                            "${totalSecs}s"
+                        } else {
+                            "${totalSecs / 60L}m"
+                        }
+                        onSnoozeWithPreset(presetStr)
+                    }
+                )
+            }
         }
     }
 }

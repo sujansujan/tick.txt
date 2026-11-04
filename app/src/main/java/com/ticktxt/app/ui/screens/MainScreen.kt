@@ -178,7 +178,8 @@ private data class WrappedNoteCardRow(
     val isCheckedItem: Boolean = false,
     val isHeading: Boolean = false,
     val isQuote: Boolean = false,
-    val isCheckboxFirstRow: Boolean = false
+    val isCheckboxFirstRow: Boolean = false,
+    val isCheckboxItemRow: Boolean = false
 )
 
 private fun buildWrappedCardRows(bodyContent: String, maxCharsPerLine: Int): List<WrappedNoteCardRow> {
@@ -203,7 +204,8 @@ private fun buildWrappedCardRows(bodyContent: String, maxCharsPerLine: Int): Lis
                             prefixColorType = if (isChecked) "check_on" else "check_off",
                             bodyText = chunk,
                             isCheckedItem = isChecked,
-                            isCheckboxFirstRow = (cIdx == 0)
+                            isCheckboxFirstRow = (cIdx == 0),
+                            isCheckboxItemRow = true
                         )
                     )
                 }
@@ -424,6 +426,8 @@ fun MainScreen(
     var smartInput by remember { mutableStateOf("") }
     var addTaskPriority by remember { mutableStateOf<Char?>(null) }
     var disabledSpans by remember { mutableStateOf(setOf<String>()) }
+    var dismissedInferredTags by remember { mutableStateOf(setOf<String>()) }
+    var backupCount by remember { mutableStateOf(storageRepo.getTodoBackupCount()) }
     var showAddDueDateWheel by remember { mutableStateOf(false) }
 
     // Optimization #7: Auto-Focus Keyboard when `[+ Add]` Popup opens
@@ -567,24 +571,30 @@ fun MainScreen(
                 }
             }
             storageRepo.saveTasks(finalTasks)
+            val latestBaks = storageRepo.getTodoBackupCount()
             val tasksToSync = if (exactDelayMillisForLastTask != null && finalTasks.isNotEmpty()) {
                 finalTasks.dropLast(1)
             } else {
                 finalTasks
             }
             scheduler.syncTaskSchedules(tasksToSync, ZonedDateTime.now())
+            withContext(Dispatchers.Main) {
+                backupCount = latestBaks
+            }
         }
     }
 
     fun reloadAllFromSafOrDisk(customSafUriStr: String? = null, switchToTasksTab: Boolean = false) {
         coroutineScope.launch(Dispatchers.IO) {
             val res = storageRepo.loadAllFromSafFolder(customSafUriStr)
+            val latestBaks = storageRepo.getTodoBackupCount()
             scheduler.syncTaskSchedules(res.tasks, ZonedDateTime.now(), forceAll = true)
             withContext(Dispatchers.Main) {
                 tasks = res.tasks
                 doneLines = res.doneLines
                 rulesText = res.rulesText
                 notes = res.notes
+                backupCount = latestBaks
                 activeNotePopupFilename = null
                 noteEditMode = false
                 statusBanner = "[/ Folder] Loaded ${res.tasks.size} task(s), ${res.notes.size} note(s)"
@@ -665,7 +675,7 @@ fun MainScreen(
                 val snapshotDone = doneLines
                 val snapshotRules = rulesText
                 val originNote = activeNotePopupFilename
-                val shouldSaveNote = originNote != null && noteEditMode && (noteDraftName.isNotBlank() || noteDraftText.isNotBlank())
+                val shouldSaveNote = originNote != null && (noteDraftName.isNotBlank() || noteDraftText.isNotBlank())
                 val draftName = noteDraftName
                 val draftText = noteDraftText
                 coroutineScope.launch(Dispatchers.IO) {
@@ -688,11 +698,14 @@ fun MainScreen(
                 currentNow = LocalDateTime.now()
                 coroutineScope.launch(Dispatchers.IO) {
                     val res = storageRepo.loadAllFromSafFolder()
+                    val latestBaks = storageRepo.getTodoBackupCount()
+                    scheduler.syncTaskSchedules(res.tasks, ZonedDateTime.now())
                     withContext(Dispatchers.Main) {
                         tasks = res.tasks
                         doneLines = res.doneLines
                         rulesText = res.rulesText
                         notes = res.notes
+                        backupCount = latestBaks
                     }
                 }
             }
@@ -822,6 +835,20 @@ fun MainScreen(
             coroutineScope.launch { pagerState.animateScrollToPage(1) }
         } else {
             var newTask = TodoParser.parseLine(res.formattedTodoLine, tasks.size + 1)
+            if (dismissedInferredTags.isNotEmpty()) {
+                val filteredProj = newTask.projects.filterNot { "+$it" in dismissedInferredTags }
+                val filteredCtx = newTask.contexts.filterNot { "@$it" in dismissedInferredTags }
+                val filteredTokens = newTask.rawTokens.filterNot { tok ->
+                    (tok.startsWith("+") && tok in dismissedInferredTags) ||
+                        (tok.startsWith("@") && tok in dismissedInferredTags)
+                }
+                newTask = newTask.copy(
+                    projects = filteredProj,
+                    contexts = filteredCtx,
+                    rawTokens = filteredTokens,
+                    isDirty = true
+                )
+            }
             if (addTaskPriority != null && newTask.priority == null) {
                 newTask = newTask.copy(priority = addTaskPriority, isDirty = true)
             }
@@ -840,6 +867,7 @@ fun MainScreen(
             smartInput = ""
             addTaskPriority = null
             disabledSpans = emptySet()
+            dismissedInferredTags = emptySet()
             showAddTaskPopup = false
             focusManager.clearFocus()
             // Do NOT set statusBanner on Add so the top area / padding never expands and shrinks!
@@ -1008,11 +1036,15 @@ fun MainScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        val openTabCount = tasks.count { !it.isBlankOrComment && !it.isCompleted }
+                                        val allTabCount = tasks.count { !it.isBlankOrComment }
+                                        val dueTabCount = tasks.count { !it.isBlankOrComment && !it.isCompleted && it.dueDate != null }
+                                        val doneTabCount = tasks.count { !it.isBlankOrComment && it.isCompleted }
                                         listOf(
-                                            "open" to "Open",
-                                            "all" to "All",
-                                            "due" to "Due",
-                                            "done" to "Done"
+                                            "open" to (if (openTabCount > 0) "Open($openTabCount)" else "Open"),
+                                            "all" to (if (allTabCount > 0) "All($allTabCount)" else "All"),
+                                            "due" to (if (dueTabCount > 0) "Due($dueTabCount)" else "Due"),
+                                            "done" to (if (doneTabCount > 0) "Done($doneTabCount)" else "Done")
                                         ).forEach { (fKey, fLabel) ->
                                             val active = activeFilter == fKey && searchQuery.isBlank()
                                             Text(
@@ -1150,6 +1182,33 @@ fun MainScreen(
                                         )
                                     }
                                 }
+                                val completedInTodoCount = tasks.count { !it.isBlankOrComment && it.isCompleted }
+                                if (activeFilter == "done" && completedInTodoCount > 0) {
+                                    AsciiHorizontalBorder(corner = "|")
+                                    AsciiBoxLeftRightRow(
+                                        left = "$completedInTodoCount completed in todo.txt",
+                                        right = "[✓ Archive -> done.txt]",
+                                        leftColor = palette.fgMuted,
+                                        rightColor = palette.reminder,
+                                        fontSizeSp = (fontScaleSp - 2).coerceAtLeast(11),
+                                        boldRight = true,
+                                        underlineRight = true,
+                                        onClick = {
+                                            undoSnapshot = tasks
+                                            coroutineScope.launch(Dispatchers.IO) {
+                                                val (remaining, newDone, count) = storageRepo.archiveCompletedTasks(tasks, doneLines)
+                                                scheduler.syncTaskSchedules(remaining, ZonedDateTime.now())
+                                                val bCount = storageRepo.getTodoBackupCount()
+                                                withContext(Dispatchers.Main) {
+                                                    tasks = remaining
+                                                    doneLines = newDone
+                                                    backupCount = bCount
+                                                    statusBanner = "[✓ Archive] Moved $count task(s) to done.txt"
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
                                 AsciiHorizontalBorder()
 
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -1166,16 +1225,27 @@ fun MainScreen(
                                             Column(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .padding(vertical = 12.dp),
+                                                    .padding(vertical = 14.dp),
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
-                                                AsciiTitledTopBorder(badgeText = "EMPTY", badgeColor = palette.fgMuted)
+                                                AsciiTitledTopBorder(
+                                                    badgeText = "ALL CLEAR",
+                                                    badgeColor = palette.reminder,
+                                                    rightBadgeText = activeFilter.uppercase()
+                                                )
+                                                AsciiBoxBodyRow(
+                                                    text = if (searchQuery.isNotBlank()) "No tasks matching \"$searchQuery\"" else "Zero pending items in [$activeFilter] — plain text is clean.",
+                                                    textColor = palette.fgMuted,
+                                                    fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
+                                                )
+                                                AsciiHorizontalBorder(corner = "|")
                                                 AsciiBoxLeftRightRow(
-                                                    left = if (searchQuery.isNotBlank()) "No matches for \"$searchQuery\"" else "No tasks in [$activeFilter]",
-                                                    right = "[+ Add]",
-                                                    leftColor = palette.fgMuted,
+                                                    left = "Create a new task",
+                                                    right = "[+ Add Task]",
+                                                    leftColor = palette.fg,
                                                     rightColor = palette.reminder,
                                                     boldRight = true,
+                                                    underlineRight = true,
                                                     onClick = { showAddTaskPopup = true }
                                                 )
                                                 AsciiHorizontalBorder()
@@ -1512,13 +1582,24 @@ fun MainScreen(
                                         .padding(bottom = 58.dp)
                                 ) {
                                     if (filteredNotes.isEmpty()) {
-                                        AsciiTitledTopBorder(badgeText = "EMPTY", badgeColor = palette.fgMuted)
+                                        AsciiTitledTopBorder(
+                                            badgeText = "NOTES BOARD EMPTY",
+                                            badgeColor = palette.project,
+                                            rightBadgeText = ".md"
+                                        )
+                                        AsciiBoxBodyRow(
+                                            text = if (searchQuery.isNotBlank()) "No Markdown notes matching \"$searchQuery\"" else "No Markdown (.md) notes on the board yet.",
+                                            textColor = palette.fgMuted,
+                                            fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
+                                        )
+                                        AsciiHorizontalBorder(corner = "|")
                                         AsciiBoxLeftRightRow(
-                                            left = if (searchQuery.isNotBlank()) "No notes matching \"$searchQuery\"" else "No Markdown (.md) notes yet",
-                                            right = "[+ Add]",
-                                            leftColor = palette.fgMuted,
+                                            left = "Start a Markdown checklist or note",
+                                            right = "[+ New Note]",
+                                            leftColor = palette.fg,
                                             rightColor = palette.reminder,
                                             boldRight = true,
+                                            underlineRight = true,
                                             onClick = { createAndOpenNewMarkdownNote() }
                                         )
                                         AsciiHorizontalBorder()
@@ -1674,6 +1755,8 @@ fun MainScreen(
                             baseDir = storageRepo.baseDir,
                             storageFolderPath = settings.customSafUri ?: storageRepo.baseDir.absolutePath,
                             settings = settings,
+                            backupCount = backupCount,
+                            completedCount = tasks.count { !it.isBlankOrComment && it.isCompleted },
                             onUpdateSettings = onUpdateSettings,
                             onSyncAllToGoogleCalendar = {
                                 if (gcalManager.hasCalendarPermissions()) {
@@ -1719,12 +1802,36 @@ fun MainScreen(
                                 val completed = tasks.filter { it.isCompleted }
                                 if (completed.isNotEmpty()) {
                                     undoSnapshot = tasks
-                                    val newDone = doneLines + completed.map { TodoParser.serializeLine(it) }
-                                    doneLines = newDone
                                     coroutineScope.launch(Dispatchers.IO) {
-                                        storageRepo.saveDoneLines(newDone)
+                                        val (remaining, newDone, count) = storageRepo.archiveCompletedTasks(tasks, doneLines)
+                                        scheduler.syncTaskSchedules(remaining, ZonedDateTime.now())
+                                        val bCount = storageRepo.getTodoBackupCount()
+                                        withContext(Dispatchers.Main) {
+                                            tasks = remaining
+                                            doneLines = newDone
+                                            backupCount = bCount
+                                            statusBanner = "[✓ Archive] Moved $count task(s) to done.txt"
+                                        }
                                     }
-                                    persistAndSchedule(tasks.filterNot { it.isCompleted })
+                                }
+                            },
+                            onRestoreLatestBackup = {
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    val restored = storageRepo.restoreLatestTodoBackup()
+                                    val bCount = storageRepo.getTodoBackupCount()
+                                    if (restored != null) {
+                                        scheduler.syncTaskSchedules(restored, ZonedDateTime.now(), forceAll = true)
+                                        withContext(Dispatchers.Main) {
+                                            tasks = restored
+                                            backupCount = bCount
+                                            statusBanner = "[↺ Backup] Restored ${restored.size} task(s)"
+                                        }
+                                    } else {
+                                        withContext(Dispatchers.Main) {
+                                            backupCount = bCount
+                                            statusBanner = "[↺ Backup] No backup snapshots available"
+                                        }
+                                    }
                                 }
                             },
                             onFireImmediateNotification = {
@@ -2435,7 +2542,10 @@ fun MainScreen(
                                     value = smartInput,
                                     onValueChange = {
                                         smartInput = it
-                                        disabledSpans = emptySet()
+                                        if (it.isBlank()) {
+                                            disabledSpans = emptySet()
+                                            dismissedInferredTags = emptySet()
+                                        }
                                     },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -2459,13 +2569,40 @@ fun MainScreen(
                             )
                         }
 
-                        if (parsePreview != null && parsePreview.recognizedSpans.isNotEmpty()) {
+                        val liveAutoTokens = remember(parsePreview, dismissedInferredTags) {
+                            if (parsePreview == null) emptyList()
+                            else buildList {
+                                parsePreview.projects.forEach { p ->
+                                    val tag = "+$p"
+                                    if (tag !in dismissedInferredTags) add("tag:$tag" to "$tag[x]")
+                                }
+                                parsePreview.contexts.forEach { c ->
+                                    val tag = "@$c"
+                                    if (tag !in dismissedInferredTags) add("tag:$tag" to "$tag[x]")
+                                }
+                                parsePreview.recognizedSpans.forEach { span ->
+                                    if (!span.resolvedToken.startsWith("+") && !span.resolvedToken.startsWith("@")) {
+                                        add("span:${span.id}" to "${span.resolvedToken}[x]")
+                                    }
+                                }
+                            }
+                        }
+
+                        if (liveAutoTokens.isNotEmpty()) {
                             AsciiHorizontalBorder(corner = "|")
                             AsciiBoxOptionRow(
-                                label = "[* Inferred]",
-                                options = parsePreview.recognizedSpans.map { it.id to "${it.resolvedToken}[x]" },
+                                label = "Auto",
+                                options = liveAutoTokens,
                                 selectedValue = "",
-                                onSelect = { spanId -> disabledSpans = disabledSpans + spanId },
+                                onSelect = { tokenKey ->
+                                    if (tokenKey.startsWith("tag:")) {
+                                        val tag = tokenKey.removePrefix("tag:")
+                                        dismissedInferredTags = dismissedInferredTags + tag
+                                    } else if (tokenKey.startsWith("span:")) {
+                                        val spanId = tokenKey.removePrefix("span:")
+                                        disabledSpans = disabledSpans + spanId
+                                    }
+                                },
                                 activeColor = palette.reminder,
                                 fontSizeSp = (fontScaleSp - 1).coerceAtLeast(12)
                             )
@@ -2616,8 +2753,10 @@ private fun KeepAsciiMarkdownCard(
                             fontFamily = monoFont,
                             softWrap = false,
                             maxLines = 1,
-                            modifier = if (row.isCheckboxFirstRow) {
-                                Modifier.clickable { onToggleChecklistLine(row.originalLineIdx) }
+                            modifier = if (row.isCheckboxItemRow) {
+                                Modifier
+                                    .clickable { onToggleChecklistLine(row.originalLineIdx) }
+                                    .padding(end = 2.dp)
                             } else {
                                 Modifier
                             }

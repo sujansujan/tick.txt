@@ -1,32 +1,68 @@
 package com.ticktxt.app.core.reminders
 
+import android.app.KeyguardManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.ticktxt.app.core.storage.TickStorageRepository
 import com.ticktxt.app.core.todotxt.TodoParser
 import com.ticktxt.app.ui.screens.AlarmAudioController
 import com.ticktxt.app.ui.screens.FullScreenAlarmActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDate
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
 /**
- * Full-Screen First Notification Receiver:
- * - When a reminder triggers (`ACTION_FIRE_REMINDER`), it plays the notification chime and
- *   opens `FullScreenAlarmActivity` directly in front WITHOUT cluttering the system notification tray.
+ * Full-Screen First Notification Receiver (Off-Main-Thread `goAsync()` + Lock-Screen Wake Handshake):
+ * - When a reminder triggers (`ACTION_FIRE_REMINDER`), it acquires a 5s wake lock, plays the chime,
+ *   and opens `FullScreenAlarmActivity` directly in front WITHOUT cluttering the system notification tray.
+ * - If the screen is locked or Android 12–15 blocks direct background activity start (verified via a
+ *   320ms `FullScreenAlarmActivity.isCurrentlyVisible` handshake), it fires a high-priority
+ *   `fullScreenIntent` to wake the lock screen—and `FullScreenAlarmActivity.onResume()` immediately
+ *   cancels the tray notification the moment the full-screen window appears.
  * - ONLY when the user dismisses the full-screen notification (`[X Dismiss]` or Back) without
  *   choosing Done or Snooze does `postTrayNotificationOnDismiss(...)` place the notification
- *   into the system notification shade, where it stays until dismissed or acted on from the shade.
+ *   into the system notification shade.
  */
 class AlarmBroadcastReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
+        val appContext = context.applicationContext
+        val pendingResult = goAsync()
+
+        val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val wakeLock = runCatching {
+            pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "tick.txt:ReminderWakeLock")?.apply {
+                setReferenceCounted(false)
+                acquire(5_000L)
+            }
+        }.getOrNull()
+
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            try {
+                handleIntentOffMainThread(appContext, intent)
+            } finally {
+                runCatching {
+                    if (wakeLock?.isHeld == true) wakeLock.release()
+                }
+                runCatching { pendingResult.finish() }
+            }
+        }
+    }
+
+    private suspend fun handleIntentOffMainThread(context: Context, intent: Intent) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         ensureChannel(context, nm)
 
@@ -49,7 +85,6 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
 
                 // Make sure no tray notification is showing while the Full-Screen UI is active
                 nm.cancel(notifId)
-                AlarmAudioController.playSystemNotificationBeepOnce(context)
 
                 val fullScreenIntent = Intent(context, FullScreenAlarmActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -64,38 +99,50 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
                     putExtra("extra_notif_id", notifId)
                 }
 
-                val launchedActivity = runCatching {
-                    context.startActivity(fullScreenIntent)
-                    true
-                }.getOrDefault(false)
-
-                if (!launchedActivity) {
-                    // Fallback if OS blocked background activity start: post to tray with fullScreenIntent
-                    postTrayNotificationOnDismiss(
-                        context = context,
-                        reminderId = reminderId,
-                        taskId = taskId,
-                        rawSpec = rawSpec,
-                        taskTitle = taskTitle,
-                        notifId = notifId,
-                        attachFullScreenIntent = true
+                val launchedDirectly = withContext(Dispatchers.Main) {
+                    AlarmAudioController.playSystemNotificationBeepOnce(context)
+                    context.sendBroadcast(
+                        Intent(ReminderScheduler.ACTION_ALARM_FIRED_UI).apply {
+                            setPackage(context.packageName)
+                            putExtra(ReminderScheduler.EXTRA_REMINDER_ID, reminderId)
+                            putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
+                            putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
+                            putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
+                            putExtra("extra_notif_id", notifId)
+                        }
                     )
+                    runCatching {
+                        context.startActivity(fullScreenIntent)
+                        true
+                    }.getOrDefault(false)
                 }
 
-                context.sendBroadcast(
-                    Intent(ReminderScheduler.ACTION_ALARM_FIRED_UI).apply {
-                        setPackage(context.packageName)
-                        putExtra(ReminderScheduler.EXTRA_REMINDER_ID, reminderId)
-                        putExtra(ReminderScheduler.EXTRA_TASK_ID, taskId)
-                        putExtra(ReminderScheduler.EXTRA_RAW_SPEC, rawSpec)
-                        putExtra(ReminderScheduler.EXTRA_TASK_TITLE, taskTitle)
-                        putExtra("extra_notif_id", notifId)
+                // Lock-Screen / Android 12–15 Handshake:
+                // Wait 320ms; if FullScreenAlarmActivity hasn't entered onStart/onResume (e.g. keyguard locked
+                // or background start silently suppressed), trigger a fullScreenIntent wake-up.
+                // As soon as FullScreenAlarmActivity.onResume() fires, it immediately cancels `notifId`!
+                val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                val isLockedOrScreenOff = (km?.isKeyguardLocked == true) || (pm?.isInteractive == false)
+
+                if (!launchedDirectly || isLockedOrScreenOff) {
+                    delay(320L)
+                    if (!FullScreenAlarmActivity.isCurrentlyVisible.get()) {
+                        postTrayNotificationOnDismiss(
+                            context = context,
+                            reminderId = reminderId,
+                            taskId = taskId,
+                            rawSpec = rawSpec,
+                            taskTitle = taskTitle,
+                            notifId = notifId,
+                            attachFullScreenIntent = true
+                        )
                     }
-                )
+                }
             }
 
             ReminderScheduler.ACTION_SNOOZE_REMINDER -> {
-                AlarmAudioController.stopAll()
+                withContext(Dispatchers.Main) { AlarmAudioController.stopAll() }
                 val preset = intent.getStringExtra(ReminderScheduler.EXTRA_SNOOZE_PRESET) ?: "10m"
                 val targetZdt = ReminderScheduleCalculator.computeSnoozeTarget(ZonedDateTime.now(), preset)
                 val targetEpochMs = targetZdt.toInstant().toEpochMilli()
@@ -119,7 +166,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
             }
 
             ReminderScheduler.ACTION_MARK_DONE -> {
-                AlarmAudioController.stopAll()
+                withContext(Dispatchers.Main) { AlarmAudioController.stopAll() }
                 snoozeStore.acknowledgeAndDismiss(taskId, rawSpec)
                 val currentTasks = repo.loadTasks()
                 val updated = mutableListOf<com.ticktxt.app.core.todotxt.TodoTask>()
@@ -145,7 +192,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
 
             ReminderScheduler.ACTION_DISMISS_REMINDER -> {
                 // Triggered when the user explicitly swipes away the notification from the system shade
-                AlarmAudioController.stopAll()
+                withContext(Dispatchers.Main) { AlarmAudioController.stopAll() }
                 snoozeStore.acknowledgeAndDismiss(taskId, rawSpec)
                 nm.cancel(notifId)
             }
@@ -175,7 +222,7 @@ class AlarmBroadcastReceiver : BroadcastReceiver() {
 
         /**
          * Posts the reminder into the system notification shade ONLY when the user dismisses
-         * the Full-Screen Notification without marking Done or Snooze.
+         * the Full-Screen Notification without marking Done or Snooze (or as a lock-screen wake fallback).
          * Stays in the shade (`setAutoCancel(false)`) until swiped away or acted on there.
          */
         fun postTrayNotificationOnDismiss(

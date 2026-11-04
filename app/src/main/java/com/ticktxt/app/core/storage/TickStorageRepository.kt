@@ -32,7 +32,7 @@ data class SafFolderLoadResult(
 
 /**
  * Single source-of-truth disk manager for `todo.txt`, `done.txt`, `tick.rules.txt`,
- * Markdown `.md` notes in `notes/`, and `SharedPreferences` settings.
+ * Markdown `.md` notes in `notes/`, rolling `.tick/backups/` snapshots, and `SharedPreferences` settings.
  */
 class TickStorageRepository(private val context: Context) {
 
@@ -45,6 +45,7 @@ class TickStorageRepository(private val context: Context) {
     val doneFile: File get() = File(baseDir, "done.txt")
     val rulesFile: File get() = File(baseDir, "tick.rules.txt")
     val notesDir: File get() = File(baseDir, "notes").apply { mkdirs() }
+    val backupsDir: File get() = File(File(baseDir, ".tick"), "backups").apply { mkdirs() }
     private val notesRepo: NotesRepository get() = NotesRepository(notesDir)
 
     fun ensureInitialized() {
@@ -88,6 +89,79 @@ class TickStorageRepository(private val context: Context) {
     }
 
     /**
+     * Records a rolling plain-text backup in `.tick/backups/` before modifying `todo.txt`,
+     * `done.txt`, or `tick.rules.txt` (retaining the latest 5 snapshots per file).
+     */
+    private fun recordRollingBackup(sourceFile: File, incomingContent: String) {
+        runCatching {
+            if (!sourceFile.exists()) return
+            val existing = sourceFile.readText(Charsets.UTF_8)
+            if (existing.isBlank() || existing.trim() == incomingContent.trim()) return
+
+            val prefix = "${sourceFile.nameWithoutExtension}_"
+            val existingBaks = backupsDir.listFiles { f ->
+                f.isFile && f.name.startsWith(prefix) && f.name.endsWith(".bak")
+            }?.sortedByDescending { it.lastModified() } ?: emptyList()
+
+            val oldLineCount = existing.lines().count { it.isNotBlank() }
+            val newLineCount = incomingContent.lines().count { it.isNotBlank() }
+            val isShrinkOrDelete = newLineCount < oldLineCount
+            val nowMs = System.currentTimeMillis()
+            val enoughTimeElapsed = existingBaks.isEmpty() || (nowMs - existingBaks.first().lastModified() >= 15_000L)
+
+            if (isShrinkOrDelete || enoughTimeElapsed) {
+                val bakFile = File(backupsDir, "${prefix}${nowMs}.bak")
+                AtomicFileWriter.writeAtomically(bakFile, existing)
+                val updatedBaks = backupsDir.listFiles { f ->
+                    f.isFile && f.name.startsWith(prefix) && f.name.endsWith(".bak")
+                }?.sortedByDescending { it.lastModified() } ?: emptyList()
+                updatedBaks.drop(5).forEach { oldBak -> runCatching { oldBak.delete() } }
+            }
+        }
+    }
+
+    fun getTodoBackupCount(): Int {
+        return runCatching {
+            backupsDir.listFiles { f ->
+                f.isFile && f.name.startsWith("todo_") && f.name.endsWith(".bak")
+            }?.size ?: 0
+        }.getOrDefault(0)
+    }
+
+    fun restoreLatestTodoBackup(): List<TodoTask>? {
+        return runCatching {
+            val latestBak = backupsDir.listFiles { f ->
+                f.isFile && f.name.startsWith("todo_") && f.name.endsWith(".bak")
+            }?.maxByOrNull { it.lastModified() } ?: return null
+
+            val restoredRaw = latestBak.readText(Charsets.UTF_8)
+            latestBak.delete()
+            AtomicFileWriter.writeAtomically(todoFile, restoredRaw)
+            writeToSafFile("todo.txt", "text/plain", restoredRaw)
+            TodoParser.parseFile(restoredRaw)
+        }.getOrNull()
+    }
+
+    /**
+     * Moves all completed (`x ...`) tasks from `todo.txt` into `done.txt` atomically.
+     * Returns `(remainingTasks, updatedDoneLines, archivedCount)`.
+     */
+    fun archiveCompletedTasks(currentTasks: List<TodoTask>, currentDoneLines: List<String>): Triple<List<TodoTask>, List<String>, Int> {
+        val completed = currentTasks.filter { it.isCompleted }
+        if (completed.isEmpty()) {
+            return Triple(currentTasks, currentDoneLines, 0)
+        }
+        val remaining = currentTasks.filterNot { it.isCompleted }
+            .mapIndexed { idx, task -> task.copy(lineNumber = idx + 1) }
+        val newlyArchivedLines = completed.map { TodoParser.serializeLine(it).trim() }.filter { it.isNotEmpty() }
+        val mergedDone = (currentDoneLines + newlyArchivedLines).distinct()
+
+        saveDoneLines(mergedDone)
+        saveTasks(remaining)
+        return Triple(remaining, mergedDone, completed.size)
+    }
+
+    /**
      * Called immediately when the user selects a folder via `[/ Folder]` (or taps `[↺ Reload]`).
      * Loads `todo.txt`, `done.txt`, `tick.rules.txt`, and Markdown `.md` notes from the SAF folder.
      */
@@ -118,6 +192,7 @@ class TickStorageRepository(private val context: Context) {
 
         val loadedTasks: List<TodoTask> = if (safTodoDoc != null) {
             val rawTodo = readDocumentText(safTodoDoc) ?: ""
+            recordRollingBackup(todoFile, rawTodo)
             runCatching { AtomicFileWriter.writeAtomically(todoFile, rawTodo) }
             TodoParser.parseFile(rawTodo)
         } else if (!hasExistingSaves) {
@@ -127,6 +202,7 @@ class TickStorageRepository(private val context: Context) {
         } else {
             val rawTodo = readFromSafFile("todo.txt", safDir) ?: ""
             if (rawTodo.isNotEmpty()) {
+                recordRollingBackup(todoFile, rawTodo)
                 runCatching { AtomicFileWriter.writeAtomically(todoFile, rawTodo) }
             }
             TodoParser.parseFile(rawTodo.ifEmpty { runCatching { todoFile.readText(Charsets.UTF_8) }.getOrDefault("") })
@@ -134,6 +210,7 @@ class TickStorageRepository(private val context: Context) {
 
         val loadedDoneLines: List<String> = if (safDoneDoc != null) {
             val rawDone = readDocumentText(safDoneDoc) ?: ""
+            recordRollingBackup(doneFile, rawDone)
             runCatching { AtomicFileWriter.writeAtomically(doneFile, rawDone) }
             rawDone.lines().filter { it.isNotBlank() }
         } else {
@@ -146,6 +223,7 @@ class TickStorageRepository(private val context: Context) {
 
         val loadedRulesText: String = if (safRulesDoc != null) {
             val rawRules = readDocumentText(safRulesDoc) ?: TickRulesConfig.DEFAULT_RULES_FILE_CONTENT
+            recordRollingBackup(rulesFile, rawRules)
             runCatching { AtomicFileWriter.writeAtomically(rulesFile, rawRules) }
             rawRules
         } else {
@@ -191,6 +269,7 @@ class TickStorageRepository(private val context: Context) {
         val safContent = readFromSafFile("todo.txt")
         val raw = safContent ?: runCatching { todoFile.readText(Charsets.UTF_8) }.getOrDefault("")
         if (safContent != null) {
+            recordRollingBackup(todoFile, safContent)
             runCatching { AtomicFileWriter.writeAtomically(todoFile, safContent) }
         }
         return TodoParser.parseFile(raw)
@@ -199,6 +278,7 @@ class TickStorageRepository(private val context: Context) {
     fun saveTasks(tasks: List<TodoTask>) {
         val numbered = tasks.mapIndexed { index, task -> task.copy(lineNumber = index + 1) }
         val serialized = TodoParser.serializeFile(numbered)
+        recordRollingBackup(todoFile, serialized)
         AtomicFileWriter.writeAtomically(todoFile, serialized)
         writeToSafFile("todo.txt", "text/plain", serialized)
     }
@@ -208,6 +288,7 @@ class TickStorageRepository(private val context: Context) {
         val safContent = readFromSafFile("done.txt")
         val raw = safContent ?: runCatching { doneFile.readText(Charsets.UTF_8) }.getOrDefault("")
         if (safContent != null) {
+            recordRollingBackup(doneFile, safContent)
             runCatching { AtomicFileWriter.writeAtomically(doneFile, safContent) }
         }
         return raw.lines().filter { it.isNotBlank() }
@@ -215,6 +296,7 @@ class TickStorageRepository(private val context: Context) {
 
     fun saveDoneLines(lines: List<String>) {
         val content = if (lines.isEmpty()) "" else lines.joinToString("\n") + "\n"
+        recordRollingBackup(doneFile, content)
         AtomicFileWriter.writeAtomically(doneFile, content)
         writeToSafFile("done.txt", "text/plain", content)
     }
@@ -223,6 +305,7 @@ class TickStorageRepository(private val context: Context) {
         ensureInitialized()
         val safContent = readFromSafFile("tick.rules.txt")
         if (safContent != null) {
+            recordRollingBackup(rulesFile, safContent)
             runCatching { AtomicFileWriter.writeAtomically(rulesFile, safContent) }
         }
         return safContent ?: runCatching { rulesFile.readText(Charsets.UTF_8) }
@@ -230,6 +313,7 @@ class TickStorageRepository(private val context: Context) {
     }
 
     fun saveRulesText(content: String) {
+        recordRollingBackup(rulesFile, content)
         AtomicFileWriter.writeAtomically(rulesFile, content)
         writeToSafFile("tick.rules.txt", "text/plain", content)
     }

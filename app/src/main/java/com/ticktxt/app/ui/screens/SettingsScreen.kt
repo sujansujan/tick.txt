@@ -28,21 +28,25 @@ private fun formatReadableStoragePath(rawPath: String): String {
 
 /**
  * Compact Settings screen with all options strictly inside the full-width ASCII boxes:
- * - System theme as default (`System | Dark | Light`)
+ * - System theme as default (`System | Dark | AMOLED | Light`)
  * - Pure Notification reminders (`! REMINDERS` with clean lead-time presets `0m | -5m | -15m | -30m | -1h`)
- * - Single-line human-readable SAF storage path + `[/ Folder]`, `[↺ Reload]`, `[> Share]`, `[✓ Archive]`.
+ * - Single-line human-readable SAF storage path + `[/ Folder]`, `[↺ Reload]`, `[> Share]`,
+ *   `[✓ Archive -> done.txt]`, and `[↺ Restore Backup]`.
  */
 @Composable
 fun SettingsScreen(
     baseDir: File,
     storageFolderPath: String,
     settings: PersistedSettings,
+    backupCount: Int = 0,
+    completedCount: Int = 0,
     onUpdateSettings: (PersistedSettings) -> Unit,
     onSyncAllToGoogleCalendar: () -> Unit,
     onPickFolderWithSaf: () -> Unit,
     onReloadFromFolder: () -> Unit = {},
     onOpenSavedFileLocation: () -> Unit,
     onArchiveCompletedTasks: () -> Unit,
+    onRestoreLatestBackup: () -> Unit = {},
     onFireImmediateNotification: () -> Unit
 ) {
     val context = LocalContext.current
@@ -69,6 +73,7 @@ fun SettingsScreen(
                 options = listOf(
                     ThemeMode.SYSTEM to "System",
                     ThemeMode.DRACULA_DARK to "Dark",
+                    ThemeMode.AMOLED_BLACK to "AMOLED",
                     ThemeMode.ALUCARD_LIGHT to "Light"
                 ),
                 selectedValue = settings.themeMode,
@@ -170,7 +175,7 @@ fun SettingsScreen(
             AsciiHorizontalBorder()
         }
 
-        // 4. +--[/ PLAIN TEXT STORAGE]---------------------------------+
+        // 4. +--[/ PLAIN TEXT STORAGE & BACKUPS]-----------------------+
         Column(modifier = Modifier.fillMaxWidth()) {
             val readablePath = remember(storageFolderPath) {
                 formatReadableStoragePath(storageFolderPath)
@@ -178,7 +183,7 @@ fun SettingsScreen(
             AsciiTitledTopBorder(
                 badgeText = "/ PLAIN TEXT STORAGE",
                 badgeColor = palette.project,
-                rightBadgeText = "todo.txt"
+                rightBadgeText = "bak:$backupCount"
             )
             AsciiBoxBodyRow(
                 text = readablePath,
@@ -190,10 +195,23 @@ fun SettingsScreen(
                 actions = listOf(
                     Triple<String, Color, () -> Unit>("[/ Folder]", palette.project) { onPickFolderWithSaf() },
                     Triple<String, Color, () -> Unit>("[↺ Reload]", palette.contextTag) { onReloadFromFolder() },
-                    Triple<String, Color, () -> Unit>("[> Share]", palette.fg) { onOpenSavedFileLocation() },
-                    Triple<String, Color, () -> Unit>("[✓ Archive]", palette.reminder) { onArchiveCompletedTasks() }
+                    Triple<String, Color, () -> Unit>("[> Share]", palette.fg) { onOpenSavedFileLocation() }
                 ),
                 fontSizeSp = (baseSp - 1).coerceAtLeast(12)
+            )
+            AsciiHorizontalBorder(corner = "|")
+            AsciiBoxActionRow(
+                actions = listOf(
+                    Triple<String, Color, () -> Unit>(
+                        if (completedCount > 0) "[✓ Archive ($completedCount) -> done.txt]" else "[✓ Archive -> done.txt]",
+                        if (completedCount > 0) palette.reminder else palette.fgMuted
+                    ) { onArchiveCompletedTasks() },
+                    Triple<String, Color, () -> Unit>(
+                        if (backupCount > 0) "[↺ Restore Backup ($backupCount)]" else "[↺ No Backups]",
+                        if (backupCount > 0) palette.priorityB else palette.fgMuted
+                    ) { onRestoreLatestBackup() }
+                ),
+                fontSizeSp = (baseSp - 2).coerceAtLeast(11)
             )
             AsciiHorizontalBorder()
         }

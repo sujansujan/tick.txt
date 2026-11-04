@@ -4,6 +4,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.ticktxt.app.core.storage.TickStorageRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.time.ZonedDateTime
 
 /**
@@ -12,7 +16,8 @@ import java.time.ZonedDateTime
  * - ACTION_MY_PACKAGE_REPLACED (app update)
  * - ACTION_TIMEZONE_CHANGED / ACTION_TIME_CHANGED ("android.intent.action.TIME_SET")
  *
- * Reloads `todo.txt` and reschedules all pending alarms and reminders immediately.
+ * Uses `goAsync()` on `Dispatchers.IO` so loading `todo.txt` (including SAF streams)
+ * and rescheduling alarms never blocks the main receiver thread.
  */
 class BootAndTimeChangeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -25,7 +30,15 @@ class BootAndTimeChangeReceiver : BroadcastReceiver() {
             "android.intent.action.TIME_SET"
         )
         if (intent.action in validActions) {
-            AlarmResyncWorker.enqueueImmediateResync(context, reason = intent.action ?: "boot")
+            val appContext = context.applicationContext
+            val pendingResult = goAsync()
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                try {
+                    AlarmResyncWorker.enqueueImmediateResync(appContext, reason = intent.action ?: "boot")
+                } finally {
+                    runCatching { pendingResult.finish() }
+                }
+            }
         }
     }
 }

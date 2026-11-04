@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.sp
 enum class ThemeMode {
     SYSTEM,
     DRACULA_DARK,
+    AMOLED_BLACK,
     ALUCARD_LIGHT
 }
 
@@ -57,6 +58,27 @@ val DraculaPalette = TickSemanticPalette(
     fg = Color(0xFFF8F8F2),
     fgMuted = Color(0xFF9499B8),
     border = Color(0xFF44475A),
+    priorityA = Color(0xFFFF6E6E),
+    priorityB = Color(0xFFFFB86C),
+    priorityC = Color(0xFFF1FA8C),
+    project = Color(0xFFBD93F9),
+    contextTag = Color(0xFF8BE9FD),
+    reminder = Color(0xFF50FA7B),
+    noteLink = Color(0xFFFF79C6)
+)
+
+/**
+ * Pure `#000000` AMOLED Black palette with dimmed OLED-friendly ASCII borders
+ * and crisp Dracula syntax highlights. Always used by the Full-Screen Notification
+ * and selectable as a full-app theme in Settings.
+ */
+val AmoledPalette = TickSemanticPalette(
+    isDark = true,
+    bg = Color(0xFF000000),
+    bgElevated = Color(0xFF0A0B10),
+    fg = Color(0xFFEBEBF0),
+    fgMuted = Color(0xFF6E7594),
+    border = Color(0xFF2E3140),
     priorityA = Color(0xFFFF6E6E),
     priorityB = Color(0xFFFFB86C),
     priorityC = Color(0xFFF1FA8C),
@@ -118,12 +140,14 @@ fun TickTxtTheme(
     fontMode: FontMode = FontMode.MONOSPACE,
     content: @Composable () -> Unit
 ) {
-    val useDark = when (themeMode) {
-        ThemeMode.SYSTEM -> isSystemInDarkTheme()
-        ThemeMode.DRACULA_DARK -> true
-        ThemeMode.ALUCARD_LIGHT -> false
+    val sysDark = isSystemInDarkTheme()
+    val palette = when (themeMode) {
+        ThemeMode.SYSTEM -> if (sysDark) DraculaPalette else AlucardPalette
+        ThemeMode.DRACULA_DARK -> DraculaPalette
+        ThemeMode.AMOLED_BLACK -> AmoledPalette
+        ThemeMode.ALUCARD_LIGHT -> AlucardPalette
     }
-    val palette = if (useDark) DraculaPalette else AlucardPalette
+    val useDark = palette.isDark
     val fontFamily = fontMode.toComposeFontFamily()
     val colorScheme = if (useDark) {
         darkColorScheme(

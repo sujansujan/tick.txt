@@ -69,6 +69,7 @@ import com.ticktxt.app.core.reminders.ReminderScheduler
 import com.ticktxt.app.core.storage.PersistedSettings
 import com.ticktxt.app.core.storage.TickStorageRepository
 import com.ticktxt.app.core.todotxt.TodoParser
+import com.ticktxt.app.core.todotxt.RawToken
 import com.ticktxt.app.core.todotxt.TodoTask
 import com.ticktxt.app.ui.theme.LocalTickFontFamily
 import com.ticktxt.app.ui.theme.LocalTickPalette
@@ -836,16 +837,15 @@ fun MainScreen(
         } else {
             var newTask = TodoParser.parseLine(res.formattedTodoLine, tasks.size + 1)
             if (dismissedInferredTags.isNotEmpty()) {
-                val filteredProj = newTask.projects.filterNot { "+$it" in dismissedInferredTags }
-                val filteredCtx = newTask.contexts.filterNot { "@$it" in dismissedInferredTags }
-                val filteredTokens = newTask.rawTokens.filterNot { tok ->
-                    (tok.startsWith("+") && tok in dismissedInferredTags) ||
-                        (tok.startsWith("@") && tok in dismissedInferredTags)
+                val filteredTokens = newTask.bodyTokens.filterNot { tok ->
+                    when (tok) {
+                        is RawToken.Project -> "+${tok.name}" in dismissedInferredTags || tok.rawText in dismissedInferredTags
+                        is RawToken.ContextTag -> "@${tok.name}" in dismissedInferredTags || tok.rawText in dismissedInferredTags
+                        else -> tok.rawText in dismissedInferredTags
+                    }
                 }
                 newTask = newTask.copy(
-                    projects = filteredProj,
-                    contexts = filteredCtx,
-                    rawTokens = filteredTokens,
+                    bodyTokens = filteredTokens,
                     isDirty = true
                 )
             }

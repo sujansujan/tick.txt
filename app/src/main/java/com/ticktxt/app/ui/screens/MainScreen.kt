@@ -63,6 +63,7 @@ import com.ticktxt.app.core.nlp.SmartAddParser
 import com.ticktxt.app.core.notes.NoteFile
 import com.ticktxt.app.core.notes.NotesRepository
 import com.ticktxt.app.core.notes.PlainTextSearchIndex
+import com.ticktxt.app.core.reminders.AlarmBroadcastReceiver
 import com.ticktxt.app.core.reminders.ReminderScheduleCalculator
 import com.ticktxt.app.core.reminders.ReminderScheduler
 import com.ticktxt.app.core.storage.PersistedSettings
@@ -86,7 +87,6 @@ import java.util.Locale
 // Optimization #5: Pre-compiled Regexes
 private val DUE_TAG_REGEX = Regex("\\bdue:\\S+")
 private val DUETIME_TAG_REGEX = Regex("\\bduetime:\\S+")
-// Matches `- [ ]` or `- [x]` even when there is no text after `]`
 private val CHECKBOX_LINE_REGEX = Regex("^(\\s*[-*]\\s+\\[)([ xX])(\\]\\s*.*)$")
 private val INLINE_MD_TOKEN_REGEX = Regex("(\\*\\*[^*]+\\*\\*|\\*[^*]+\\*|`[^`]+`)")
 
@@ -115,10 +115,6 @@ private fun toggleMarkdownCheckboxAtLine(rawMarkdown: String, targetLineIndex: I
     return lines.joinToString("\n")
 }
 
-/**
- * Word-wraps a string into chunks of at most `maxChars` so every visual row inside a
- * Keep-style ASCII card has unbroken `| ... |` side borders and never cuts off short notes.
- */
 private fun wrapTextToChunks(text: String, maxChars: Int): List<String> {
     val clean = text.trim()
     if (clean.isEmpty()) return listOf("")
@@ -176,8 +172,8 @@ private fun wrapTextToChunks(text: String, maxChars: Int): List<String> {
 
 private data class WrappedNoteCardRow(
     val originalLineIdx: Int,
-    val prefixToken: String,     // e.g. "[ ] ", "[x] ", "# ", "• ", "| ", or "  " for continuation
-    val prefixColorType: String, // "check_on", "check_off", "heading", "bullet", "quote", "plain"
+    val prefixToken: String,
+    val prefixColorType: String,
     val bodyText: String,
     val isCheckedItem: Boolean = false,
     val isHeading: Boolean = false,
@@ -422,18 +418,18 @@ fun MainScreen(
     // Popups with shaded background
     var editingTask by remember { mutableStateOf<TodoTask?>(null) }
     var editingTaskDraft by remember { mutableStateOf("") }
-    var showEditSnoozeWheel by remember { mutableStateOf(false) }
+    var showEditDueDateWheel by remember { mutableStateOf(false) }
 
     var showAddTaskPopup by remember { mutableStateOf(false) }
     var smartInput by remember { mutableStateOf("") }
     var addTaskPriority by remember { mutableStateOf<Char?>(null) }
     var disabledSpans by remember { mutableStateOf(setOf<String>()) }
-    var showAddSnoozeWheel by remember { mutableStateOf(false) }
+    var showAddDueDateWheel by remember { mutableStateOf(false) }
 
     // Optimization #7: Auto-Focus Keyboard when `[+ Add]` Popup opens
     val addInputFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(showAddTaskPopup, showAddSnoozeWheel) {
-        if (showAddTaskPopup && !showAddSnoozeWheel) {
+    LaunchedEffect(showAddTaskPopup, showAddDueDateWheel) {
+        if (showAddTaskPopup && !showAddDueDateWheel) {
             delay(80L)
             runCatching { addInputFocusRequester.requestFocus() }
         }
@@ -499,12 +495,9 @@ fun MainScreen(
     ) {
         val remId = "$taskId|$rawSpec"
         val notifId = (remId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100)
-        scheduler.fireImmediateNotification(
-            taskTitle = taskTitle,
-            rawSpec = rawSpec,
-            typeCode = "n",
-            taskId = taskId
-        )
+        // Ensure no tray notification is present while the Full-Screen Notification is open!
+        cancelShadeNotification(notifId)
+        AlarmAudioController.playSystemNotificationBeepOnce(context)
         activeAlarmOverlay = ActiveAlarmPayload(
             reminderId = remId,
             taskId = taskId,
@@ -609,10 +602,6 @@ fun MainScreen(
         noteEditMode = startInEditMode
     }
 
-    /**
-     * Opens a blank Markdown note draft in the popup WITHOUT writing a placeholder file to disk first.
-     * The file is only saved once when you finish/save or close with content—preventing duplicate/orphan notes!
-     */
     fun createAndOpenNewMarkdownNote() {
         activeNotePopupFilename = NEW_NOTE_SENTINEL
         noteDraftName = ""
@@ -625,7 +614,6 @@ fun MainScreen(
         val trimmedTitle = noteDraftName.trim()
         val trimmedBody = noteDraftText.trim()
 
-        // If brand-new note and completely empty, discard without creating any file
         if (currentOrigin == NEW_NOTE_SENTINEL && trimmedTitle.isEmpty() && trimmedBody.isEmpty()) {
             if (closePopup) {
                 noteEditMode = false
@@ -728,6 +716,7 @@ fun MainScreen(
                         val spec = intent.getStringExtra(ReminderScheduler.EXTRA_RAW_SPEC) ?: "0m/n"
                         val title = intent.getStringExtra(ReminderScheduler.EXTRA_TASK_TITLE) ?: "scheduled task"
                         val nId = intent.getIntExtra("extra_notif_id", (remId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100))
+                        cancelShadeNotification(nId)
                         activeAlarmOverlay = ActiveAlarmPayload(remId, tId, title, spec, nId)
                     }
                 }
@@ -747,10 +736,20 @@ fun MainScreen(
 
     BackHandler(enabled = true) {
         when {
-            showEditSnoozeWheel -> showEditSnoozeWheel = false
-            showAddSnoozeWheel -> showAddSnoozeWheel = false
+            showEditDueDateWheel -> showEditDueDateWheel = false
+            showAddDueDateWheel -> showAddDueDateWheel = false
             activeAlarmOverlay != null -> {
+                // Dismissing full-screen via Back posts the notification into the system notification shade!
+                val alarm = activeAlarmOverlay!!
                 AlarmAudioController.stopAll()
+                AlarmBroadcastReceiver.postTrayNotificationOnDismiss(
+                    context = context,
+                    reminderId = alarm.reminderId,
+                    taskId = alarm.taskId,
+                    rawSpec = alarm.rawSpec,
+                    taskTitle = alarm.taskTitle,
+                    notifId = alarm.notifId
+                )
                 activeAlarmOverlay = null
             }
             editingTask != null -> editingTask = null
@@ -820,10 +819,8 @@ fun MainScreen(
             disabledSpans = emptySet()
             showAddTaskPopup = false
             focusManager.clearFocus()
-            statusBanner = null
             coroutineScope.launch { pagerState.animateScrollToPage(1) }
         } else {
-            undoSnapshot = tasks
             var newTask = TodoParser.parseLine(res.formattedTodoLine, tasks.size + 1)
             if (addTaskPriority != null && newTask.priority == null) {
                 newTask = newTask.copy(priority = addTaskPriority, isDirty = true)
@@ -845,7 +842,7 @@ fun MainScreen(
             disabledSpans = emptySet()
             showAddTaskPopup = false
             focusManager.clearFocus()
-            statusBanner = "[+ Added] ${newTask.description}"
+            // Do NOT set statusBanner on Add so the top area / padding never expands and shrinks!
         }
     }
 
@@ -931,8 +928,16 @@ fun MainScreen(
                 activeAlarmOverlay = null
             },
             onDismiss = {
+                // Posts the notification to the system tray ONLY when Full-Screen is dismissed!
                 AlarmAudioController.stopAll()
-                statusBanner = "[!] Kept in notification shade"
+                AlarmBroadcastReceiver.postTrayNotificationOnDismiss(
+                    context = context,
+                    reminderId = alarm.reminderId,
+                    taskId = alarm.taskId,
+                    rawSpec = alarm.rawSpec,
+                    taskTitle = alarm.taskTitle,
+                    notifId = alarm.notifId
+                )
                 activeAlarmOverlay = null
             },
             onMarkDone = {
@@ -954,13 +959,14 @@ fun MainScreen(
         return
     }
 
+    // Root Box does NOT use `.imePadding()` so opening/closing the keyboard in popups
+    // never compresses or shrinks the background task list or bottom navigation bar!
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.bg)
             .statusBarsPadding()
             .navigationBarsPadding()
-            .imePadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // =================================================================
@@ -1144,34 +1150,6 @@ fun MainScreen(
                                         )
                                     }
                                 }
-
-                                // Status / Undo Row
-                                if (statusBanner != null) {
-                                    AsciiHorizontalBorder(corner = "|")
-                                    AsciiBoxLeftRightRow(
-                                        left = statusBanner ?: "",
-                                        right = if (undoSnapshot != null || undoDeletedNote != null) "[↺ Undo]" else "[X Close]",
-                                        leftColor = palette.reminder,
-                                        rightColor = palette.project,
-                                        fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12),
-                                        boldRight = true,
-                                        onClick = {
-                                            if (undoSnapshot != null) {
-                                                persistAndSchedule(undoSnapshot!!)
-                                                undoSnapshot = null
-                                            }
-                                            if (undoDeletedNote != null) {
-                                                val (restoredName, restoredBody) = undoDeletedNote!!
-                                                undoDeletedNote = null
-                                                coroutineScope.launch(Dispatchers.IO) {
-                                                    val saved = storageRepo.saveNote(restoredName, restoredBody)
-                                                    withContext(Dispatchers.Main) { notes = saved }
-                                                }
-                                            }
-                                            statusBanner = null
-                                        }
-                                    )
-                                }
                                 AsciiHorizontalBorder()
 
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -1304,6 +1282,42 @@ fun MainScreen(
                                 }
                             }
 
+                            // Non-displacing Floating Undo/Status Toast at Bottom-Start (never shifts task list padding!)
+                            if (statusBanner != null) {
+                                Column(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(start = 12.dp, end = 108.dp, bottom = 6.dp)
+                                        .background(palette.bg)
+                                ) {
+                                    AsciiHorizontalBorder()
+                                    AsciiBoxLeftRightRow(
+                                        left = statusBanner ?: "",
+                                        right = if (undoSnapshot != null || undoDeletedNote != null) "[↺ Undo]" else "[X]",
+                                        leftColor = palette.reminder,
+                                        rightColor = palette.project,
+                                        fontSizeSp = (fontScaleSp - 2).coerceAtLeast(11),
+                                        boldRight = true,
+                                        onClick = {
+                                            if (undoSnapshot != null) {
+                                                persistAndSchedule(undoSnapshot!!)
+                                                undoSnapshot = null
+                                            }
+                                            if (undoDeletedNote != null) {
+                                                val (restoredName, restoredBody) = undoDeletedNote!!
+                                                undoDeletedNote = null
+                                                coroutineScope.launch(Dispatchers.IO) {
+                                                    val saved = storageRepo.saveNote(restoredName, restoredBody)
+                                                    withContext(Dispatchers.Main) { notes = saved }
+                                                }
+                                            }
+                                            statusBanner = null
+                                        }
+                                    )
+                                    AsciiHorizontalBorder()
+                                }
+                            }
+
                             // 3. Uniform Pure-ASCII `[+ Add]` Box at Bottom-Right
                             Column(
                                 modifier = Modifier
@@ -1341,8 +1355,6 @@ fun MainScreen(
 
                     1 -> {
                         // TAB 1: GOOGLE KEEP-STYLE STAGGERED MARKDOWN NOTES BOARD
-                        // - Shows up to half the screen height (~14 wrapped lines) per note card before truncating!
-                        // - Single `[+ Add]` button at bottom-right (no duplicate `[+ Add]` in top border, no static instruction banner).
                         val leftColumnNotes = remember(filteredNotes) { filteredNotes.filterIndexed { index, _ -> index % 2 == 0 } }
                         val rightColumnNotes = remember(filteredNotes) { filteredNotes.filterIndexed { index, _ -> index % 2 == 1 } }
 
@@ -1352,7 +1364,6 @@ fun MainScreen(
                                     .fillMaxSize()
                                     .padding(horizontal = 12.dp, vertical = 4.dp)
                             ) {
-                                // Compact Functional Top Bar: [*2-Col*] | 1-Col | [/] Search
                                 AsciiHorizontalBorder()
                                 Row(
                                     modifier = Modifier
@@ -1489,34 +1500,10 @@ fun MainScreen(
                                         )
                                     }
                                 }
-
-                                if (statusBanner != null) {
-                                    AsciiHorizontalBorder(corner = "|")
-                                    AsciiBoxLeftRightRow(
-                                        left = statusBanner ?: "",
-                                        right = if (undoDeletedNote != null) "[↺ Undo]" else "[X Close]",
-                                        leftColor = palette.reminder,
-                                        rightColor = palette.project,
-                                        fontSizeSp = (fontScaleSp - 2).coerceAtLeast(12),
-                                        boldRight = true,
-                                        onClick = {
-                                            if (undoDeletedNote != null) {
-                                                val (restoredName, restoredBody) = undoDeletedNote!!
-                                                undoDeletedNote = null
-                                                coroutineScope.launch(Dispatchers.IO) {
-                                                    val saved = storageRepo.saveNote(restoredName, restoredBody)
-                                                    withContext(Dispatchers.Main) { notes = saved }
-                                                }
-                                            }
-                                            statusBanner = null
-                                        }
-                                    )
-                                }
                                 AsciiHorizontalBorder()
 
                                 Spacer(modifier = Modifier.height(6.dp))
 
-                                // Google Keep-Style Board (Up to half-screen height per note card!)
                                 Column(
                                     modifier = Modifier
                                         .weight(1f)
@@ -1611,6 +1598,38 @@ fun MainScreen(
                                             }
                                         }
                                     }
+                                }
+                            }
+
+                            // Non-displacing Floating Undo Toast at Bottom-Start on Notes tab
+                            if (statusBanner != null) {
+                                Column(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(start = 12.dp, end = 108.dp, bottom = 6.dp)
+                                        .background(palette.bg)
+                                ) {
+                                    AsciiHorizontalBorder()
+                                    AsciiBoxLeftRightRow(
+                                        left = statusBanner ?: "",
+                                        right = if (undoDeletedNote != null) "[↺ Undo]" else "[X]",
+                                        leftColor = palette.reminder,
+                                        rightColor = palette.project,
+                                        fontSizeSp = (fontScaleSp - 2).coerceAtLeast(11),
+                                        boldRight = true,
+                                        onClick = {
+                                            if (undoDeletedNote != null) {
+                                                val (restoredName, restoredBody) = undoDeletedNote!!
+                                                undoDeletedNote = null
+                                                coroutineScope.launch(Dispatchers.IO) {
+                                                    val saved = storageRepo.saveNote(restoredName, restoredBody)
+                                                    withContext(Dispatchers.Main) { notes = saved }
+                                                }
+                                            }
+                                            statusBanner = null
+                                        }
+                                    )
+                                    AsciiHorizontalBorder()
                                 }
                             }
 
@@ -1800,6 +1819,7 @@ fun MainScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = 0.78f))
+                    .imePadding()
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
@@ -1825,7 +1845,6 @@ fun MainScreen(
                         onRightBadgeClick = { commitNoteDraftAndClose(closePopup = true) }
                     )
 
-                    // Filename / Title Row (`| # filename.md |`)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -1878,7 +1897,6 @@ fun MainScreen(
                     }
                     AsciiHorizontalBorder(corner = "|")
 
-                    // 1-Tap Markdown Formatting Toolbar inside the ASCII box
                     AsciiBoxActionRow(
                         actions = listOf(
                             Triple<String, Color, () -> Unit>("[+ # H1]", palette.project) {
@@ -1918,7 +1936,6 @@ fun MainScreen(
                     )
                     AsciiHorizontalBorder(corner = "|")
 
-                    // Note Body: Edit Mode vs Interactive Rendered Markdown Preview
                     if (noteEditMode) {
                         Row(
                             modifier = Modifier
@@ -2000,7 +2017,6 @@ fun MainScreen(
 
                     AsciiHorizontalBorder(corner = "|")
 
-                    // Uniform Bottom Action Row (Can delete any note, even the last one, with Undo!)
                     val popupActions: List<Triple<String, Color, () -> Unit>> = buildList {
                         add(
                             Triple<String, Color, () -> Unit>(
@@ -2137,7 +2153,7 @@ fun MainScreen(
         }
 
         // =====================================================================
-        // POPUP 2: SCREENSHOT-1 STYLE "EDIT REMINDER" POPUP + WHEEL SNOOZE
+        // POPUP 2: EDIT TASK POPUP + DUE DATE & TIME WHEEL PICKER
         // =====================================================================
         if (editingTask != null) {
             val target = editingTask!!
@@ -2157,14 +2173,15 @@ fun MainScreen(
                 targetDt.format(DateTimeFormatter.ofPattern("EEE, d MMM • HH:mm", Locale.ENGLISH))
             }
 
-            if (showEditSnoozeWheel) {
+            if (showEditDueDateWheel) {
                 AsciiSnoozeWheelPopup(
                     taskTitle = parsedDraft.description.ifEmpty { target.description },
                     initialDate = parsedDraft.dueDate,
                     initialTime = parsedDraft.dueTime,
                     fontSizeSp = fontScaleSp,
-                    confirmLabel = "[zZ Snooze]",
-                    onDismiss = { showEditSnoozeWheel = false },
+                    isSnoozeMode = false,
+                    confirmLabel = "[✓ Set Due]",
+                    onDismiss = { showEditDueDateWheel = false },
                     onConfirmDateTime = { chosenDate, chosenTime, delayMs ->
                         val dStr = chosenDate.toString()
                         val tStr = "%02d:%02d".format(chosenTime.hour, chosenTime.minute)
@@ -2174,14 +2191,7 @@ fun MainScreen(
                         updated = TodoParser.withUpdatedTag(updated, "duetime", tStr)
                         updated = TodoParser.withReplacedMultiTag(updated, "rem", listOf(specStr))
                         editingTaskDraft = TodoParser.serializeLine(updated)
-
-                        undoSnapshot = tasks
-                        val updatedTasks = tasks.map { if (it.lineNumber == target.lineNumber) updated else it }
-                        persistAndSchedule(updatedTasks)
-                        scheduleExactDelayNotification(updated, delayMs, specStr)
-                        showEditSnoozeWheel = false
-                        editingTask = null
-                        statusBanner = "[zZ Snooze] $dStr $tStr"
+                        showEditDueDateWheel = false
                     }
                 )
             } else {
@@ -2189,6 +2199,7 @@ fun MainScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color.Black.copy(alpha = 0.78f))
+                        .imePadding()
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
@@ -2207,7 +2218,7 @@ fun MainScreen(
                             .padding(10.dp)
                     ) {
                         AsciiTitledTopBorder(
-                            badgeText = "/ EDIT REMINDER",
+                            badgeText = "/ EDIT TASK",
                             badgeColor = palette.reminder,
                             rightBadgeText = "X Close",
                             rightBadgeColor = palette.fgMuted,
@@ -2282,24 +2293,23 @@ fun MainScreen(
                         )
                         AsciiHorizontalBorder(corner = "|")
 
+                        // Due Date & Time Wheel Trigger Row (No Snooze label!)
                         AsciiBoxLeftRightRow(
                             left = "(L) $formattedDateLine",
-                            right = "$deltaStr [zZ Snooze]",
+                            right = "$deltaStr [L Pick Due]",
                             leftColor = palette.fg,
                             rightColor = palette.reminder,
                             fontSizeSp = fontScaleSp,
                             boldLeft = true,
                             boldRight = true,
                             underlineRight = true,
-                            onClick = { showEditSnoozeWheel = true }
+                            onClick = { showEditDueDateWheel = true }
                         )
                         AsciiHorizontalBorder(corner = "|")
 
+                        // Clean Bottom Actions: [# GCal]  [✓ Save]  [X Delete]
                         AsciiBoxActionRow(
                             actions = listOf(
-                                Triple("[zZ Snooze]", palette.project) {
-                                    showEditSnoozeWheel = true
-                                },
                                 Triple(if (isTargetGcalSynced) "[# Synced]" else "[# GCal]", palette.contextTag) {
                                     val parsed = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
                                     if (gcalManager.hasCalendarPermissions()) {
@@ -2325,7 +2335,6 @@ fun MainScreen(
                                         tasks.map { if (it.lineNumber == target.lineNumber) reParsed else it }
                                     )
                                     editingTask = null
-                                    statusBanner = "[✓ Save] Updated task"
                                 },
                                 Triple("[X Delete]", palette.priorityA) {
                                     undoSnapshot = tasks
@@ -2343,17 +2352,18 @@ fun MainScreen(
         }
 
         // =====================================================================
-        // POPUP 3: ADD TASK POPUP + WHEEL SNOOZE PICKER
+        // POPUP 3: ADD TASK POPUP + DUE DATE & TIME WHEEL PICKER
         // =====================================================================
         if (showAddTaskPopup) {
-            if (showAddSnoozeWheel) {
+            if (showAddDueDateWheel) {
                 AsciiSnoozeWheelPopup(
                     taskTitle = smartInput.ifBlank { "New Task" },
                     initialDate = parsePreview?.dueDate ?: currentNow.toLocalDate(),
-                    initialTime = parsePreview?.dueTime ?: LocalTime.now().plusMinutes(10).withSecond(0).withNano(0),
+                    initialTime = parsePreview?.dueTime ?: LocalTime.now().plusHours(1).withMinute(0).withSecond(0).withNano(0),
                     fontSizeSp = fontScaleSp,
-                    confirmLabel = "[✓ Save]",
-                    onDismiss = { showAddSnoozeWheel = false },
+                    isSnoozeMode = false,
+                    confirmLabel = "[✓ Set Due]",
+                    onDismiss = { showAddDueDateWheel = false },
                     onConfirmDateTime = { chosenDate, chosenTime, _ ->
                         val dStr = chosenDate.toString()
                         val tStr = "%02d:%02d".format(chosenTime.hour, chosenTime.minute)
@@ -2362,7 +2372,7 @@ fun MainScreen(
                             .replace(DUETIME_TAG_REGEX, "")
                             .trim()
                         smartInput = "$cleaned due:$dStr duetime:$tStr".trim()
-                        showAddSnoozeWheel = false
+                        showAddDueDateWheel = false
                     }
                 )
             } else {
@@ -2370,6 +2380,7 @@ fun MainScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color.Black.copy(alpha = 0.78f))
+                        .imePadding()
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
@@ -2388,7 +2399,7 @@ fun MainScreen(
                             .padding(10.dp)
                     ) {
                         AsciiTitledTopBorder(
-                            badgeText = "+ ADD REMINDER / TASK",
+                            badgeText = "+ ADD TASK",
                             badgeColor = palette.reminder,
                             rightBadgeText = "X Close",
                             rightBadgeColor = palette.fgMuted,
@@ -2496,20 +2507,21 @@ fun MainScreen(
                         )
 
                         AsciiHorizontalBorder(corner = "|")
+                        // Due Date & Time Wheel Trigger Row (No Snooze option during task creation!)
                         val previewDateText = if (parsePreview?.dueDate != null) {
                             "${parsePreview.dueDate} ${parsePreview.dueTime ?: ""}".trim()
                         } else {
-                            "Tap to pick Date & Time"
+                            "Due Date & Time (optional)"
                         }
                         AsciiBoxLeftRightRow(
                             left = "(L) $previewDateText",
-                            right = "[zZ Snooze]",
+                            right = "[L Pick Due]",
                             leftColor = palette.fg,
                             rightColor = palette.project,
                             fontSizeSp = fontScaleSp,
                             boldRight = true,
                             underlineRight = true,
-                            onClick = { showAddSnoozeWheel = true }
+                            onClick = { showAddDueDateWheel = true }
                         )
                         AsciiHorizontalBorder(corner = "|")
 
@@ -2528,13 +2540,6 @@ fun MainScreen(
     }
 }
 
-/**
- * Google Keep-Style Compact ASCII Markdown Note Card for the Staggered Board!
- * - Word-wraps lines into chunks so every visual row has unbroken `| ... |` ASCII borders
- *   and short/medium notes (like `beautiful.md`) are never cut off at 4 words!
- * - Shows up to half the screen height (`maxHalfScreenVisualLines = 14`); only notes longer
- *   than half the screen show `... (+N more lines — tap to view)` at the bottom.
- */
 @Composable
 private fun KeepAsciiMarkdownCard(
     note: NoteFile,
@@ -2667,14 +2672,6 @@ private fun KeepAsciiMarkdownCard(
     }
 }
 
-/**
- * Renders a single Markdown line inside the full Popup Note Viewer (`| ... |`) with support for:
- * - `# `, `## `, `### ` headings
- * - `- [ ]` and `- [x]` interactive checkboxes
- * - `- ` and `* ` bullets
- * - `> ` blockquotes
- * - Inline `**bold**`, `*italic*`, and `` `inline code` ``.
- */
 @Composable
 private fun MarkdownFormattedRow(
     rawLine: String,
@@ -2833,12 +2830,6 @@ private fun MarkdownFormattedRow(
 
 private fun fontScaleSp(sz: Int): Int = sz
 
-/**
- * 3-Line Task Card with Live Relative Countdown Badge:
- * Line 1: `+--[2026-11-04 09:30]-----------------[+trial • 18 h. 4 m.]--+`
- * Line 2: `| [ ] (A) chocotat with color                                |`
- * Line 3: `+------------------------------------------------------------+`
- */
 @Composable
 private fun UsableTaskCard(
     task: TodoTask,

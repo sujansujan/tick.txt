@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -486,9 +487,11 @@ object PlainTextSportsAscii {
 }
 
 /**
- * Screenshot-1 Style Interactive 3-Column ASCII Wheel / Drum Snooze & Reminder Picker Popup!
- * Includes Optimization #6: Fling / Momentum Physics (`VelocityTracker` + decay coroutine)
- * so flicking any wheel column glides smoothly with haptic feedback.
+ * Interactive 3-Column ASCII Wheel / Drum Picker Popup:
+ * - When `isSnoozeMode = false` (used during Task Creation and Task Editing):
+ *   Acts as a clean **Due Date & Time Wheel Picker** (`L PICK DUE DATE & TIME`) with no snooze options!
+ * - When `isSnoozeMode = true` (used when tapping `[zZ Snooze]` inside the Full-Screen Notification):
+ *   Shows the full Snooze controls (`From: Now | Reminder time`, `[zZ +10m]`, `[*Cal Wheel*] | [+Offset]`).
  */
 @Composable
 fun AsciiSnoozeWheelPopup(
@@ -496,7 +499,8 @@ fun AsciiSnoozeWheelPopup(
     initialDate: LocalDate?,
     initialTime: LocalTime?,
     fontSizeSp: Int = 15,
-    confirmLabel: String = "[zZ Snooze]",
+    isSnoozeMode: Boolean = true,
+    confirmLabel: String = if (isSnoozeMode) "[zZ Snooze]" else "[✓ Set Due]",
     onDismiss: () -> Unit,
     onConfirmDateTime: (LocalDate, LocalTime, Long) -> Unit
 ) {
@@ -506,11 +510,16 @@ fun AsciiSnoozeWheelPopup(
     val monoFont = FontFamily.Monospace
     val nowDt = remember { LocalDateTime.now().withSecond(0).withNano(0) }
 
-    var anchorToNow by remember { mutableStateOf(true) }
+    var anchorToNow by remember { mutableStateOf(isSnoozeMode) }
     var wheelMode by remember { mutableStateOf("cal") } // "cal" = Date/Hour/Min wheel, "offset" = Amount/Unit wheel
 
-    val baseDt = remember(anchorToNow, initialDate, initialTime) {
-        if (!anchorToNow && initialDate != null) {
+    val baseDt = remember(anchorToNow, initialDate, initialTime, isSnoozeMode) {
+        if (!isSnoozeMode) {
+            LocalDateTime.of(
+                initialDate ?: nowDt.toLocalDate(),
+                initialTime ?: nowDt.plusHours(1).withMinute(0).toLocalTime()
+            )
+        } else if (!anchorToNow && initialDate != null) {
             LocalDateTime.of(initialDate, initialTime ?: LocalTime.of(9, 0))
         } else {
             nowDt.plusMinutes(10)
@@ -522,7 +531,7 @@ fun AsciiSnoozeWheelPopup(
     var selectedHour by remember { mutableStateOf(baseDt.hour) }
     var selectedMinute by remember { mutableStateOf((baseDt.minute / 5) * 5) }
 
-    // Granular Offset Wheel State (sec, min, hr, day, wk, mo)
+    // Granular Offset Wheel State (only used when isSnoozeMode == true and wheelMode == "offset")
     var offsetAmount by remember { mutableStateOf(10) }
     var offsetUnitIdx by remember { mutableStateOf(1) } // 0=sec, 1=min, 2=hr, 3=day, 4=wk, 5=mo
     val allUnits = SnoozeUnit.entries
@@ -609,9 +618,9 @@ fun AsciiSnoozeWheelPopup(
                 ) {}
                 .padding(10.dp)
         ) {
-            // 1. Header Box: Task Title & Current Reminder Time
+            // 1. Header Box: Due Date Picker vs Snooze Picker
             AsciiTitledTopBorder(
-                badgeText = "zZ SNOOZE / SCHEDULE",
+                badgeText = if (isSnoozeMode) "zZ SNOOZE REMINDER" else "L PICK DUE DATE & TIME",
                 badgeColor = palette.project,
                 rightBadgeText = deltaLabel,
                 rightBadgeColor = palette.reminder
@@ -620,10 +629,11 @@ fun AsciiSnoozeWheelPopup(
                 text = taskTitle,
                 textColor = palette.reminder,
                 fontSizeSp = fontSizeSp,
-                bold = true
+                bold = true,
+                singleLine = true
             )
             AsciiBoxLeftRightRow(
-                left = "Reminder: ${targetDateTime.format(headerFmt)}",
+                left = "${if (isSnoozeMode) "Snooze until" else "Due"}: ${targetDateTime.format(headerFmt)}",
                 right = deltaLabel,
                 leftColor = palette.fgMuted,
                 rightColor = palette.priorityB,
@@ -632,48 +642,49 @@ fun AsciiSnoozeWheelPopup(
             )
             AsciiHorizontalBorder(corner = "|")
 
-            // 2. Anchor Toggle Row: [(*) Now]  [( ) Reminder time]
-            AsciiBoxOptionRow(
-                label = "From",
-                options = listOf(
-                    true to "Now",
-                    false to "Reminder time"
-                ),
-                selectedValue = anchorToNow,
-                onSelect = { useNow ->
-                    anchorToNow = useNow
-                    val anchor = if (useNow) LocalDateTime.now().plusMinutes(10)
-                    else LocalDateTime.of(initialDate ?: LocalDate.now(), initialTime ?: LocalTime.of(9, 0)).plusMinutes(10)
-                    selectedDate = anchor.toLocalDate()
-                    selectedHour = anchor.hour
-                    selectedMinute = (anchor.minute / 5) * 5
-                },
-                activeColor = palette.reminder,
-                fontSizeSp = fontSizeSp
-            )
-
-            // 3. Mode Switcher Bar (`[32 d.   [zZ +10m] [*Cal Wheel*] [+Offset]]`)
-            AsciiBoxActionRow(
-                actions = listOf(
-                    Triple(deltaLabel, palette.reminder) {},
-                    Triple("[zZ +10m]", palette.contextTag) {
-                        val dt = LocalDateTime.now().plusMinutes(10)
-                        onConfirmDateTime(dt.toLocalDate(), dt.toLocalTime().withSecond(0).withNano(0), 600_000L)
+            // 2. Snooze-only controls (Hidden during task creation / due-date picking!)
+            if (isSnoozeMode) {
+                AsciiBoxOptionRow(
+                    label = "From",
+                    options = listOf(
+                        true to "Now",
+                        false to "Reminder time"
+                    ),
+                    selectedValue = anchorToNow,
+                    onSelect = { useNow ->
+                        anchorToNow = useNow
+                        val anchor = if (useNow) LocalDateTime.now().plusMinutes(10)
+                        else LocalDateTime.of(initialDate ?: LocalDate.now(), initialTime ?: LocalTime.of(9, 0)).plusMinutes(10)
+                        selectedDate = anchor.toLocalDate()
+                        selectedHour = anchor.hour
+                        selectedMinute = (anchor.minute / 5) * 5
                     },
-                    Triple(
-                        if (wheelMode == "cal") "[*Cal Wheel*]" else "[Cal Wheel]",
-                        if (wheelMode == "cal") palette.project else palette.fgMuted
-                    ) { wheelMode = "cal" },
-                    Triple(
-                        if (wheelMode == "offset") "[*+Offset*]" else "[+Offset]",
-                        if (wheelMode == "offset") palette.project else palette.fgMuted
-                    ) { wheelMode = "offset" }
-                ),
-                fontSizeSp = (fontSizeSp - 2).coerceAtLeast(12)
-            )
-            AsciiHorizontalBorder(corner = "|")
+                    activeColor = palette.reminder,
+                    fontSizeSp = fontSizeSp
+                )
 
-            // 4. 3-Column Interactive ASCII Drum / Wheel Picker (Drag, Flick with Momentum, or Tap!)
+                AsciiBoxActionRow(
+                    actions = listOf(
+                        Triple(deltaLabel, palette.reminder) {},
+                        Triple("[zZ +10m]", palette.contextTag) {
+                            val dt = LocalDateTime.now().plusMinutes(10)
+                            onConfirmDateTime(dt.toLocalDate(), dt.toLocalTime().withSecond(0).withNano(0), 600_000L)
+                        },
+                        Triple(
+                            if (wheelMode == "cal") "[*Cal Wheel*]" else "[Cal Wheel]",
+                            if (wheelMode == "cal") palette.project else palette.fgMuted
+                        ) { wheelMode = "cal" },
+                        Triple(
+                            if (wheelMode == "offset") "[*+Offset*]" else "[+Offset]",
+                            if (wheelMode == "offset") palette.project else palette.fgMuted
+                        ) { wheelMode = "offset" }
+                    ),
+                    fontSizeSp = (fontSizeSp - 2).coerceAtLeast(12)
+                )
+                AsciiHorizontalBorder(corner = "|")
+            }
+
+            // 3. 3-Column Interactive ASCII Drum / Wheel Picker (Drag, Flick with Momentum, or Tap!)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -908,7 +919,7 @@ fun AsciiSnoozeWheelPopup(
 
             AsciiHorizontalBorder(corner = "|")
 
-            // 5. Quick Time-of-Day Presets (08:00 | 12:00 | 16:00 | 20:00) from Screenshot 1
+            // 4. Quick Time-of-Day Presets (08:00 | 12:00 | 16:00 | 20:00)
             AsciiBoxActionRow(
                 actions = listOf(
                     Triple("[08:00]", if (wheelMode == "cal" && selectedHour == 8 && selectedMinute == 0) palette.reminder else palette.fgMuted) {
@@ -929,7 +940,7 @@ fun AsciiSnoozeWheelPopup(
 
             AsciiHorizontalBorder(corner = "|")
 
-            // 6. Uniform Bottom Action Bar: [X Close]   &   [zZ Snooze]
+            // 5. Uniform Bottom Action Bar
             AsciiBoxActionRow(
                 actions = listOf(
                     Triple("[X Close]", palette.fgMuted) { onDismiss() },
@@ -997,11 +1008,30 @@ class FullScreenAlarmActivity : ComponentActivity() {
             ?: intent.getStringExtra("extra_raw_spec") ?: "0m/n"
         val notifId = intent.getIntExtra("extra_notif_id", (reminderId.hashCode() and 0x7FFFFFFF).coerceAtLeast(100))
 
+        // Ensure the notification tray is empty while the Full-Screen Notification is open!
+        cancelNotification(notifId)
+
+        fun dismissFullScreenToTray() {
+            AlarmAudioController.stopAll()
+            AlarmBroadcastReceiver.postTrayNotificationOnDismiss(
+                context = this,
+                reminderId = reminderId,
+                taskId = taskId,
+                rawSpec = rawSpec,
+                taskTitle = taskTitle,
+                notifId = notifId
+            )
+            finish()
+        }
+
         setContent {
             TickTxtTheme(
                 themeMode = settings.themeMode,
                 fontMode = settings.fontMode
             ) {
+                BackHandler(enabled = true) {
+                    dismissFullScreenToTray()
+                }
                 AsciiFullScreenAlarmSurface(
                     taskTitle = taskTitle,
                     rawSpec = rawSpec,
@@ -1023,10 +1053,8 @@ class FullScreenAlarmActivity : ComponentActivity() {
                         finish()
                     },
                     onDismiss = {
-                        // Dismissing the full-screen window WITHOUT Done or Snooze leaves the notification
-                        // in the system notification shade until the user dismisses it from the shade as well!
-                        AlarmAudioController.stopAll()
-                        finish()
+                        // Posts the notification to the system tray ONLY when Full-Screen is dismissed!
+                        dismissFullScreenToTray()
                     },
                     onMarkDone = {
                         AlarmAudioController.stopAll()
@@ -1064,8 +1092,8 @@ class FullScreenAlarmActivity : ComponentActivity() {
  * Clean 3-Option Full-Screen Notification Surface:
  * Shows ONLY the task and the 3 primary actions:
  *   `[✓ Done]`    `[zZ Snooze]`    `[X Dismiss]`
- * Clicking `[zZ Snooze]` opens the Screenshot-1 style `AsciiSnoozeWheelPopup` over a shaded background!
- * Clicking `[X Dismiss]` closes the full-screen popup while keeping the reminder in the notification shade.
+ * Clicking `[zZ Snooze]` opens the `AsciiSnoozeWheelPopup` (`isSnoozeMode = true`).
+ * Clicking `[X Dismiss]` closes the full-screen window and places the reminder into the notification tray.
  */
 @Composable
 fun AsciiFullScreenAlarmSurface(
@@ -1118,7 +1146,6 @@ fun AsciiFullScreenAlarmSurface(
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // Clean Full-Screen Notification Box with ONLY the 3 actions: Done, Snooze, Dismiss
             Column(modifier = Modifier.fillMaxWidth()) {
                 AsciiTitledTopBorder(
                     badgeText = "! NOTIFICATION • $clockFormatted",
@@ -1153,6 +1180,7 @@ fun AsciiFullScreenAlarmSurface(
                 initialDate = LocalDate.now(),
                 initialTime = LocalTime.now().withSecond(0).withNano(0),
                 fontSizeSp = fontScaleSp(fontSizeSp),
+                isSnoozeMode = true,
                 confirmLabel = "[zZ Snooze]",
                 onDismiss = { showSnoozeWheelPopup = false },
                 onConfirmDateTime = { _, _, delayMs ->

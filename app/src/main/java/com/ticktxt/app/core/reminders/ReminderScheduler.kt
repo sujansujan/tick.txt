@@ -6,8 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.PowerManager
+import com.ticktxt.app.core.storage.TickStorageRepository
 import com.ticktxt.app.core.todotxt.TodoTask
 import com.ticktxt.app.ui.screens.FullScreenAlarmActivity
+import java.io.File
 import java.time.ZonedDateTime
 import java.util.concurrent.ConcurrentHashMap
 
@@ -30,6 +32,10 @@ class ReminderScheduler(private val context: Context) {
     private val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
     private val diffPrefs = context.getSharedPreferences(DIFF_PREFS_NAME, Context.MODE_PRIVATE)
+    private val snoozeStateFile: File by lazy {
+        val tickDir = File(TickStorageRepository(context).baseDir, ".tick").apply { mkdirs() }
+        File(tickDir, "alarm-state.json")
+    }
 
     fun canScheduleExact(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -58,9 +64,14 @@ class ReminderScheduler(private val context: Context) {
         val nowMs = System.currentTimeMillis()
         val desired = HashMap<String, Pair<ScheduledReminderInstance, Long>>()
 
+        val snoozeStore = SnoozeStateStore(snoozeStateFile)
         for (task in tasks) {
             if (task.isCompleted || task.isBlankOrComment) continue
-            val instances = ReminderScheduleCalculator.computeSchedulesForTask(task, now)
+            val instances = ReminderScheduleCalculator.computeSchedulesForTask(
+                task = task,
+                now = now,
+                snoozeStore = snoozeStore
+            )
             for (inst in instances) {
                 val targetMs = inst.triggerAt.toInstant().toEpochMilli()
                 if (targetMs > nowMs - 5_000L) {

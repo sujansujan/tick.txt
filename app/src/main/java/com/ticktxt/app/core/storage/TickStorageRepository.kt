@@ -37,6 +37,8 @@ data class SafFolderLoadResult(
 class TickStorageRepository(private val context: Context) {
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    @Volatile
+    private var lastSyncedTodoText: String? = null
 
     val baseDir: File
         get() = File(context.getExternalFilesDir(null) ?: context.filesDir, "tick").apply { mkdirs() }
@@ -53,8 +55,8 @@ class TickStorageRepository(private val context: Context) {
         if (!todoFile.exists()) {
             val initialTodo = if (!alreadySeeded) {
                 listOf(
-                    "2026-11-02 check chocotat +chocotat @factory due:2026-11-02 duetime:09:00 rem:0m/n",
-                    "(A) 2026-11-02 ship quarterly invoice +invoice @office due:2026-11-02 duetime:17:00 rem:0m/n",
+                    "2026-11-02 coffee with mum +family @home due:2026-11-02 duetime:09:00 rem:0m/n",
+                    "(A) 2026-11-02 ship quarterly invoice +work @office due:2026-11-02 duetime:17:00 rem:0m/n",
                     "2026-11-02 review architecture notes +architecture @desk note:architecture.md"
                 ).joinToString("\n") + "\n"
             } else {
@@ -138,6 +140,7 @@ class TickStorageRepository(private val context: Context) {
             latestBak.delete()
             AtomicFileWriter.writeAtomically(todoFile, restoredRaw)
             writeToSafFile("todo.txt", "text/plain", restoredRaw)
+            lastSyncedTodoText = restoredRaw
             TodoParser.parseFile(restoredRaw)
         }.getOrNull()
     }
@@ -174,8 +177,10 @@ class TickStorageRepository(private val context: Context) {
         val safDir = resolveSafDirectory(uriStr)
 
         if (safDir == null) {
+            val localTodoRaw = runCatching { todoFile.readText(Charsets.UTF_8) }.getOrDefault("")
+            lastSyncedTodoText = localTodoRaw
             return SafFolderLoadResult(
-                tasks = TodoParser.parseFile(runCatching { todoFile.readText(Charsets.UTF_8) }.getOrDefault("")),
+                tasks = TodoParser.parseFile(localTodoRaw),
                 doneLines = runCatching { doneFile.readText(Charsets.UTF_8) }.getOrDefault("").lines().filter { it.isNotBlank() },
                 rulesText = runCatching { rulesFile.readText(Charsets.UTF_8) }.getOrDefault(TickRulesConfig.DEFAULT_RULES_FILE_CONTENT),
                 notes = notesRepo.listNotes(),
@@ -194,10 +199,12 @@ class TickStorageRepository(private val context: Context) {
             val rawTodo = readDocumentText(safTodoDoc) ?: ""
             recordRollingBackup(todoFile, rawTodo)
             runCatching { AtomicFileWriter.writeAtomically(todoFile, rawTodo) }
+            lastSyncedTodoText = rawTodo
             TodoParser.parseFile(rawTodo)
         } else if (!hasExistingSaves) {
             val localRaw = runCatching { todoFile.readText(Charsets.UTF_8) }.getOrDefault("")
             writeToSafFile("todo.txt", "text/plain", localRaw, safDir)
+            lastSyncedTodoText = localRaw
             TodoParser.parseFile(localRaw)
         } else {
             val rawTodo = readFromSafFile("todo.txt", safDir) ?: ""
@@ -205,7 +212,9 @@ class TickStorageRepository(private val context: Context) {
                 recordRollingBackup(todoFile, rawTodo)
                 runCatching { AtomicFileWriter.writeAtomically(todoFile, rawTodo) }
             }
-            TodoParser.parseFile(rawTodo.ifEmpty { runCatching { todoFile.readText(Charsets.UTF_8) }.getOrDefault("") })
+            val effectiveRaw = rawTodo.ifEmpty { runCatching { todoFile.readText(Charsets.UTF_8) }.getOrDefault("") }
+            lastSyncedTodoText = effectiveRaw
+            TodoParser.parseFile(effectiveRaw)
         }
 
         val loadedDoneLines: List<String> = if (safDoneDoc != null) {
@@ -272,15 +281,37 @@ class TickStorageRepository(private val context: Context) {
             recordRollingBackup(todoFile, safContent)
             runCatching { AtomicFileWriter.writeAtomically(todoFile, safContent) }
         }
+        lastSyncedTodoText = raw
         return TodoParser.parseFile(raw)
     }
 
-    fun saveTasks(tasks: List<TodoTask>) {
+    /**
+     * Writes `todo.txt` atomically and mirrors it to SAF.
+     * If an external tool (Syncthing, Dropbox, desktop editor) modified the SAF file
+     * since the last sync, performs a lossless 3-way merge via `ConflictMerger` before writing.
+     */
+    fun saveTasks(tasks: List<TodoTask>): List<TodoTask> {
         val numbered = tasks.mapIndexed { index, task -> task.copy(lineNumber = index + 1) }
-        val serialized = TodoParser.serializeFile(numbered)
-        recordRollingBackup(todoFile, serialized)
-        AtomicFileWriter.writeAtomically(todoFile, serialized)
-        writeToSafFile("todo.txt", "text/plain", serialized)
+        val localSerialized = TodoParser.serializeFile(numbered)
+
+        val baseSnapshot = lastSyncedTodoText
+        val remoteSerialized = if (baseSnapshot != null) readFromSafFile("todo.txt") else null
+        val finalSerialized = if (
+            baseSnapshot != null &&
+            remoteSerialized != null &&
+            remoteSerialized != baseSnapshot &&
+            remoteSerialized != localSerialized
+        ) {
+            ConflictMerger.mergeThreeWay(baseSnapshot, localSerialized, remoteSerialized).mergedText
+        } else {
+            localSerialized
+        }
+
+        recordRollingBackup(todoFile, finalSerialized)
+        AtomicFileWriter.writeAtomically(todoFile, finalSerialized)
+        writeToSafFile("todo.txt", "text/plain", finalSerialized)
+        lastSyncedTodoText = finalSerialized
+        return if (finalSerialized == localSerialized) numbered else TodoParser.parseFile(finalSerialized)
     }
 
     fun loadDoneLines(): List<String> {

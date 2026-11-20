@@ -1,6 +1,9 @@
 package com.ticktxt.app.ui.theme
 
+import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -8,12 +11,16 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowInsetsControllerCompat
 
 enum class ThemeMode {
     SYSTEM,
@@ -38,10 +45,12 @@ enum class FontMode(val label: String) {
 data class TickSemanticPalette(
     val isDark: Boolean,
     val bg: Color,
+    val bgSurface: Color,
     val bgElevated: Color,
     val fg: Color,
     val fgMuted: Color,
     val border: Color,
+    val scrim: Color,
     val priorityA: Color,
     val priorityB: Color,
     val priorityC: Color,
@@ -51,13 +60,21 @@ data class TickSemanticPalette(
     val noteLink: Color
 )
 
+/**
+ * Dracula (Dark) palette tuned for flat ASCII legibility:
+ * - Passive ASCII chrome (`border = #52566E`) recedes cleanly behind `#F8F8F2` ink
+ * - Modals & floating boxes use `#2E303E` (`bgSurface`) for shadow-free separation
+ * - Inline code & swipe wells use `#1E1F29` (`bgElevated`)
+ */
 val DraculaPalette = TickSemanticPalette(
     isDark = true,
     bg = Color(0xFF282A36),
+    bgSurface = Color(0xFF2E303E),
     bgElevated = Color(0xFF1E1F29),
     fg = Color(0xFFF8F8F2),
-    fgMuted = Color(0xFF9499B8),
-    border = Color(0xFF44475A),
+    fgMuted = Color(0xFF8F96BA),
+    border = Color(0xFF52566E),
+    scrim = Color(0xFF14151C).copy(alpha = 0.78f),
     priorityA = Color(0xFFFF6E6E),
     priorityB = Color(0xFFFFB86C),
     priorityC = Color(0xFFF1FA8C),
@@ -75,10 +92,12 @@ val DraculaPalette = TickSemanticPalette(
 val AmoledPalette = TickSemanticPalette(
     isDark = true,
     bg = Color(0xFF000000),
+    bgSurface = Color(0xFF0D0E14),
     bgElevated = Color(0xFF0A0B10),
     fg = Color(0xFFEBEBF0),
     fgMuted = Color(0xFF6E7594),
-    border = Color(0xFF2E3140),
+    border = Color(0xFF34384A),
+    scrim = Color(0xFF000000).copy(alpha = 0.85f),
     priorityA = Color(0xFFFF6E6E),
     priorityB = Color(0xFFFFB86C),
     priorityC = Color(0xFFF1FA8C),
@@ -88,16 +107,24 @@ val AmoledPalette = TickSemanticPalette(
     noteLink = Color(0xFFFF79C6)
 )
 
+/**
+ * Alucard (Light) warm-parchment palette calibrated to WCAG AA+:
+ * - Warm paper `#FFFBEB` canvas, `#F7F2DF` modal surface, `#EAE3CC` inset well
+ * - `#C6BFA8` ASCII borders hold crisp character-grid structure without fighting `#1F1F1F` ink
+ * - Warm sepia scrim (`#1F1C14` @ 48%) keeps popups native to the light theme
+ */
 val AlucardPalette = TickSemanticPalette(
     isDark = false,
     bg = Color(0xFFFFFBEB),
-    bgElevated = Color(0xFFF3EFE0),
+    bgSurface = Color(0xFFF7F2DF),
+    bgElevated = Color(0xFFEAE3CC),
     fg = Color(0xFF1F1F1F),
     fgMuted = Color(0xFF595649),
-    border = Color(0xFFD8D2C0),
+    border = Color(0xFFC6BFA8),
+    scrim = Color(0xFF1F1C14).copy(alpha = 0.48f),
     priorityA = Color(0xFFCB3A2A),
     priorityB = Color(0xFFA34D14),
-    priorityC = Color(0xFF846E15),
+    priorityC = Color(0xFF7A630F),
     project = Color(0xFF644AC9),
     contextTag = Color(0xFF036A96),
     reminder = Color(0xFF14710A),
@@ -149,31 +176,62 @@ fun TickTxtTheme(
     }
     val useDark = palette.isDark
     val fontFamily = fontMode.toComposeFontFamily()
+
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? Activity)?.window ?: return@SideEffect
+            val controller = WindowInsetsControllerCompat(window, view)
+            controller.isAppearanceLightStatusBars = !useDark
+            controller.isAppearanceLightNavigationBars = !useDark
+        }
+    }
+
     val colorScheme = if (useDark) {
         darkColorScheme(
             background = palette.bg,
-            surface = palette.bg,
+            surface = palette.bgSurface,
+            surfaceVariant = palette.bgElevated,
             onBackground = palette.fg,
             onSurface = palette.fg,
+            onSurfaceVariant = palette.fgMuted,
+            outline = palette.border,
             primary = palette.project,
+            onPrimary = palette.bg,
             secondary = palette.reminder,
-            error = palette.priorityA
+            onSecondary = palette.bg,
+            error = palette.priorityA,
+            onError = palette.bg
         )
     } else {
         lightColorScheme(
             background = palette.bg,
-            surface = palette.bg,
+            surface = palette.bgSurface,
+            surfaceVariant = palette.bgElevated,
             onBackground = palette.fg,
             onSurface = palette.fg,
+            onSurfaceVariant = palette.fgMuted,
+            outline = palette.border,
             primary = palette.project,
+            onPrimary = palette.bg,
             secondary = palette.reminder,
-            error = palette.priorityA
+            onSecondary = palette.bg,
+            error = palette.priorityA,
+            onError = palette.bg
+        )
+    }
+
+    val textSelectionColors = remember(palette) {
+        TextSelectionColors(
+            handleColor = palette.project,
+            backgroundColor = palette.project.copy(alpha = if (useDark) 0.30f else 0.22f)
         )
     }
 
     CompositionLocalProvider(
         LocalTickPalette provides palette,
-        LocalTickFontFamily provides fontFamily
+        LocalTickFontFamily provides fontFamily,
+        LocalTextSelectionColors provides textSelectionColors
     ) {
         MaterialTheme(
             colorScheme = colorScheme,

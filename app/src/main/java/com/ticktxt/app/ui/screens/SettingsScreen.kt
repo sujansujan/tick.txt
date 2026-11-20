@@ -4,15 +4,25 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.ticktxt.app.core.storage.PersistedSettings
+import com.ticktxt.app.ui.ascii.AsciiBoxActionRow
+import com.ticktxt.app.ui.ascii.AsciiBoxBodyRow
+import com.ticktxt.app.ui.ascii.AsciiBoxOptionRow
+import com.ticktxt.app.ui.ascii.AsciiHorizontalBorder
+import com.ticktxt.app.ui.ascii.AsciiTitledTopBorder
 import com.ticktxt.app.ui.theme.FontMode
 import com.ticktxt.app.ui.theme.LocalTickPalette
 import com.ticktxt.app.ui.theme.ThemeMode
@@ -27,11 +37,11 @@ private fun formatReadableStoragePath(rawPath: String): String {
 }
 
 /**
- * Compact Settings screen with all options strictly inside the full-width ASCII boxes:
- * - System theme as default (`System | Dark | AMOLED | Light`)
- * - Pure Notification reminders (`! REMINDERS` with clean lead-time presets `0m | -5m | -15m | -30m | -1h`)
- * - Single-line human-readable SAF storage path + `[/ Folder]`, `[↺ Reload]`, `[> Share]`,
- *   `[✓ Archive -> done.txt]`, and `[↺ Restore Backup]`.
+ * Compact Settings screen with all options strictly inside full-width ASCII boxes:
+ * - Dracula / Alucard / AMOLED theme selector (`System | Dracula | AMOLED | Alucard`)
+ * - Reminder lead-time presets (`0m | -5m | -15m | -30m | -1h`)
+ * - Single-line human-readable SAF storage path + `[/ Folder]`, `[@ Reload]`, `[> Share]`,
+ *   `[x Archive -> done.txt]`, and `[< Restore Backup]`.
  */
 @Composable
 fun SettingsScreen(
@@ -69,12 +79,12 @@ fun SettingsScreen(
                 rightBadgeText = "${settings.fontSizeSp}sp"
             )
             AsciiBoxOptionRow(
-                label = "Mode",
+                label = "Theme",
                 options = listOf(
                     ThemeMode.SYSTEM to "System",
-                    ThemeMode.DRACULA_DARK to "Dark",
+                    ThemeMode.DRACULA_DARK to "Dracula",
                     ThemeMode.AMOLED_BLACK to "AMOLED",
-                    ThemeMode.ALUCARD_LIGHT to "Light"
+                    ThemeMode.ALUCARD_LIGHT to "Alucard"
                 ),
                 selectedValue = settings.themeMode,
                 onSelect = { onUpdateSettings(settings.copy(themeMode = it)) },
@@ -194,7 +204,7 @@ fun SettingsScreen(
             AsciiBoxActionRow(
                 actions = listOf(
                     Triple<String, Color, () -> Unit>("[/ Folder]", palette.project) { onPickFolderWithSaf() },
-                    Triple<String, Color, () -> Unit>("[↺ Reload]", palette.contextTag) { onReloadFromFolder() },
+                    Triple<String, Color, () -> Unit>("[~ Reload]", palette.contextTag) { onReloadFromFolder() },
                     Triple<String, Color, () -> Unit>("[> Share]", palette.fg) { onOpenSavedFileLocation() }
                 ),
                 fontSizeSp = (baseSp - 1).coerceAtLeast(12)
@@ -203,11 +213,11 @@ fun SettingsScreen(
             AsciiBoxActionRow(
                 actions = listOf(
                     Triple<String, Color, () -> Unit>(
-                        if (completedCount > 0) "[✓ Archive ($completedCount) -> done.txt]" else "[✓ Archive -> done.txt]",
+                        if (completedCount > 0) "[x Archive ($completedCount) -> done.txt]" else "[x Archive -> done.txt]",
                         if (completedCount > 0) palette.reminder else palette.fgMuted
                     ) { onArchiveCompletedTasks() },
                     Triple<String, Color, () -> Unit>(
-                        if (backupCount > 0) "[↺ Restore Backup ($backupCount)]" else "[↺ No Backups]",
+                        if (backupCount > 0) "[< Restore Backup ($backupCount)]" else "[< No Backups]",
                         if (backupCount > 0) palette.priorityB else palette.fgMuted
                     ) { onRestoreLatestBackup() }
                 ),

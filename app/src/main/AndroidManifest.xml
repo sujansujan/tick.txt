@@ -48,7 +48,7 @@
 
         <activity
             android:name=".ui.screens.FullScreenAlarmActivity"
-            android:exported="true"
+            android:exported="false"
             android:showOnLockScreen="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"

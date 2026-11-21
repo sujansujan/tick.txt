@@ -367,8 +367,66 @@ fun AsciiBoxAnnotatedBodyRow(
 }
 
 /**
+ * 1-line ASCII section divider for grouping tasks (`--[ ! OVERDUE (2) ]----------------`).
+ */
+@Composable
+fun AsciiSectionDivider(
+    title: String,
+    accentColor: Color,
+    lineColor: Color = LocalTickPalette.current.border
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "--[ ",
+            color = lineColor,
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        Text(
+            text = title,
+            color = accentColor,
+            fontWeight = FontWeight.Bold,
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        Text(
+            text = " ]",
+            color = lineColor,
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            softWrap = false,
+            maxLines = 1
+        )
+        Text(
+            text = DASH_FILL_240,
+            color = lineColor,
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+/**
  * Terminal reverse-video option selector: active option renders inverted (`activeColor` block
  * with `palette.bg` ink), unselected options remain clean unadorned text (no underline clutter).
+ * Includes generous tap targets and subtle clock-tick haptics.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -383,6 +441,7 @@ fun <T> AsciiBoxOptionRow(
 ) {
     val palette = LocalTickPalette.current
     val appFont = LocalTickFontFamily.current
+    val haptics = rememberTickHaptics()
 
     Row(
         modifier = Modifier
@@ -402,7 +461,7 @@ fun <T> AsciiBoxOptionRow(
         FlowRow(
             modifier = Modifier.weight(1f),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp)
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             if (label.isNotEmpty()) {
                 Text(
@@ -410,7 +469,7 @@ fun <T> AsciiBoxOptionRow(
                     color = palette.fgMuted,
                     fontSize = (fontSizeSp - 1).sp,
                     fontFamily = appFont,
-                    modifier = Modifier.padding(vertical = 2.dp)
+                    modifier = Modifier.padding(vertical = 4.dp)
                 )
             }
             options.forEach { (value, text) ->
@@ -423,8 +482,11 @@ fun <T> AsciiBoxOptionRow(
                     fontFamily = appFont,
                     modifier = Modifier
                         .then(if (isSelected) Modifier.background(activeColor) else Modifier)
-                        .clickable { onSelect(value) }
-                        .padding(vertical = 2.dp, horizontal = if (isSelected) 2.dp else 3.dp)
+                        .clickable {
+                            haptics.tap()
+                            onSelect(value)
+                        }
+                        .padding(vertical = 4.dp, horizontal = if (isSelected) 3.dp else 4.dp)
                 )
             }
         }
@@ -448,10 +510,11 @@ fun AsciiBoxActionRow(
     underline: Boolean = false
 ) {
     val appFont = LocalTickFontFamily.current
+    val haptics = rememberTickHaptics()
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 3.dp),
+            .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -478,8 +541,11 @@ fun AsciiBoxActionRow(
                     fontFamily = appFont,
                     textDecoration = if (underline) TextDecoration.Underline else TextDecoration.None,
                     modifier = Modifier
-                        .clickable { onClick() }
-                        .padding(vertical = 4.dp, horizontal = 2.dp)
+                        .clickable {
+                            haptics.tap()
+                            onClick()
+                        }
+                        .padding(vertical = 7.dp, horizontal = 4.dp)
                 )
             }
         }
@@ -504,11 +570,16 @@ fun AsciiFloatingAddButton(
     modifier: Modifier = Modifier
 ) {
     val palette = LocalTickPalette.current
+    val haptics = rememberTickHaptics()
     val monoFont = FontFamily.Monospace
     Column(
         modifier = modifier
             .background(palette.bgSurface)
-            .clickable { onClick() },
+            .clickable {
+                haptics.tap()
+                onClick()
+            }
+            .padding(vertical = 2.dp, horizontal = 2.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(

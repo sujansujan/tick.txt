@@ -9,11 +9,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
+import android.speech.RecognizerIntent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +36,7 @@ import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items as staggeredItems
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -56,17 +59,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -91,17 +98,21 @@ import com.ticktxt.app.ui.ascii.AsciiBoxLeftRightRow
 import com.ticktxt.app.ui.ascii.AsciiBoxOptionRow
 import com.ticktxt.app.ui.ascii.AsciiFloatingAddButton
 import com.ticktxt.app.ui.ascii.AsciiHorizontalBorder
+import com.ticktxt.app.ui.ascii.AsciiSectionDivider
 import com.ticktxt.app.ui.ascii.AsciiTitledTopBorder
 import com.ticktxt.app.ui.ascii.PlainTextSportsAscii
+import com.ticktxt.app.ui.ascii.rememberTickHaptics
 import com.ticktxt.app.ui.ascii.toggleMarkdownCheckboxAtLine
 import com.ticktxt.app.ui.components.AddTaskDialog
 import com.ticktxt.app.ui.components.EditTaskDialog
 import com.ticktxt.app.ui.components.KeepAsciiMarkdownCard
 import com.ticktxt.app.ui.components.NoteEditorDialog
+import com.ticktxt.app.ui.components.RawTextEditorDialog
 import com.ticktxt.app.ui.components.TagsFilterDialog
 import com.ticktxt.app.ui.components.UsableTaskCard
 import com.ticktxt.app.ui.theme.LocalTickFontFamily
 import com.ticktxt.app.ui.theme.LocalTickPalette
+import com.ticktxt.app.widget.TickAsciiWidgetProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -111,6 +122,7 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 private const val NEW_NOTE_SENTINEL = "__NEW_NOTE__"
 
@@ -122,18 +134,25 @@ data class ActiveAlarmPayload(
     val notifId: Int = 100
 )
 
+private sealed class TaskListEntry(val listKey: String) {
+    data class SectionHeader(val id: String, val title: String, val color: Color) : TaskListEntry("hdr:$id")
+    data class TaskRow(val task: TodoTask) : TaskListEntry("${task.lineNumber}:${task.rawLine}")
+}
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     storageRepo: TickStorageRepository,
     settings: PersistedSettings,
     initialSharedText: String? = null,
+    quickAddNonce: Int = 0,
     onConsumeSharedText: () -> Unit = {},
     onUpdateSettings: (PersistedSettings) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val haptics = LocalHapticFeedback.current
+    val haptics = rememberTickHaptics()
+    val clipboardManager = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
     val palette = LocalTickPalette.current
@@ -163,6 +182,14 @@ fun MainScreen(
     var noteDraftName by remember { mutableStateOf("") }
     var noteDraftText by remember { mutableStateOf("") }
     var undoDeletedNote by remember { mutableStateOf<Pair<String, String>?>(null) }
+
+    // In-app plain-text file editor for `tick.rules.txt` and raw `todo.txt`
+    var rawEditorKind by remember { mutableStateOf<String?>(null) } // "rules" or "todo"
+    var rawEditorDraft by remember { mutableStateOf("") }
+
+    // Tactile check-off flash & long-press inline quick triage state
+    var completingFlashKeys by remember { mutableStateOf(setOf<String>()) }
+    var expandedTriageKey by remember { mutableStateOf<String?>(null) }
 
     // Pager for swiping between tabs (0 = Tasks, 1 = Notes, 2 = Settings)
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
@@ -197,6 +224,7 @@ fun MainScreen(
         if (pagerState.currentPage != lastCommittedPage) {
             previousPlace = Pair(lastCommittedPage, activeFilter)
             lastCommittedPage = pagerState.currentPage
+            expandedTriageKey = null
         }
     }
 
@@ -204,6 +232,7 @@ fun MainScreen(
         if (newFilter != activeFilter) {
             previousPlace = Pair(pagerState.currentPage, activeFilter)
             activeFilter = newFilter
+            expandedTriageKey = null
         }
     }
 
@@ -218,13 +247,24 @@ fun MainScreen(
     var disabledSpans by remember { mutableStateOf(setOf<String>()) }
     var dismissedInferredTags by remember { mutableStateOf(setOf<String>()) }
     var showAddDueDateWheel by remember { mutableStateOf(false) }
+    var sessionAddedCount by remember { mutableIntStateOf(0) }
 
     // Handle incoming Android Share / CREATE_NOTE intents
     LaunchedEffect(initialSharedText) {
         if (!initialSharedText.isNullOrBlank()) {
             smartInput = initialSharedText
+            sessionAddedCount = 0
             showAddTaskPopup = true
             onConsumeSharedText()
+        }
+    }
+
+    // Handle Widget / App Shortcut / Quick Settings Tile direct launch into Smart Add
+    LaunchedEffect(quickAddNonce) {
+        if (quickAddNonce > 0) {
+            sessionAddedCount = 0
+            showAddTaskPopup = true
+            pagerState.scrollToPage(0)
         }
     }
 
@@ -241,6 +281,37 @@ fun MainScreen(
     var activeAlarmOverlay by remember { mutableStateOf<ActiveAlarmPayload?>(null) }
     var undoSnapshot by remember { mutableStateOf<List<TodoTask>?>(null) }
     var statusBanner by remember { mutableStateOf<String?>(null) }
+
+    // One-Tap Voice-to-Smart-Add launcher (Android built-in speech recognizer, zero dependencies)
+    val voiceInputLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+            if (!spoken.isNullOrEmpty()) {
+                haptics.confirm()
+                smartInput = if (smartInput.isBlank()) spoken else "$smartInput $spoken"
+            }
+        }
+    }
+
+    fun launchVoiceCapture() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak task (e.g. submit report friday by 5)")
+        }
+        val launched = runCatching {
+            voiceInputLauncher.launch(intent)
+            true
+        }.getOrDefault(false)
+        if (!launched) {
+            haptics.reject()
+            statusBanner = "[!] Voice input unavailable on this device"
+        }
+    }
 
     // Lifecycle-Aware Minute-Boundary Clock Tick
     var isAppResumed by remember { mutableStateOf(true) }
@@ -293,6 +364,7 @@ fun MainScreen(
                 }
             }
         } else {
+            haptics.reject()
             statusBanner = "[!] Calendar permission needed"
         }
     }
@@ -322,7 +394,6 @@ fun MainScreen(
         )
     }
 
-    // Single source of trigger truth: AlarmManager -> AlarmBroadcastReceiver -> ACTION_ALARM_FIRED_UI
     fun scheduleExactDelayNotification(task: TodoTask, delayMs: Long, rawSpec: String = "0m/n") {
         val safeDelay = delayMs.coerceAtLeast(1_000L)
         val targetEpochMs = System.currentTimeMillis() + safeDelay
@@ -347,7 +418,6 @@ fun MainScreen(
         }
     }
 
-    // Asynchronous Disk/SAF I/O (with 3-way ConflictMerger) + Incremental Diff-Based Reminder Scheduling
     fun persistAndSchedule(
         updatedTasks: List<TodoTask>,
         exactDelayMillisForLastTask: Long? = null,
@@ -378,6 +448,7 @@ fun MainScreen(
                 mergedTasks
             }
             scheduler.syncTaskSchedules(tasksToSync, ZonedDateTime.now())
+            TickAsciiWidgetProvider.refreshAllWidgets(context)
             withContext(Dispatchers.Main) {
                 if (mergedTasks != tasks) {
                     tasks = mergedTasks
@@ -387,11 +458,51 @@ fun MainScreen(
         }
     }
 
+    fun bumpTaskDueDateByOneDay(task: TodoTask, currentList: List<TodoTask>) {
+        val today = LocalDate.now()
+        val baseDate = task.dueDate?.takeIf { !it.isBefore(today) } ?: today
+        val nextDue = baseDate.plusDays(1)
+        val bumped = TodoParser.withUpdatedTag(task, "due", nextDue.toString())
+        undoSnapshot = currentList
+        persistAndSchedule(currentList.map { if (it.lineNumber == task.lineNumber) bumped else it })
+        statusBanner = "[+1d] ${task.description} -> $nextDue"
+    }
+
+    fun toggleTaskCompletionWithFlash(task: TodoTask) {
+        val flashKey = "${task.lineNumber}:${task.rawLine}"
+        if (task.isCompleted) {
+            haptics.toggle()
+            undoSnapshot = tasks
+            val reopened = TodoParser.markIncomplete(task)
+            persistAndSchedule(tasks.map { if (it.lineNumber == task.lineNumber) reopened else it })
+            statusBanner = "[< Reopen] ${task.description}"
+        } else {
+            if (flashKey in completingFlashKeys) return
+            haptics.confirm()
+            completingFlashKeys = completingFlashKeys + flashKey
+            coroutineScope.launch {
+                delay(240L)
+                val currentList = tasks
+                val stillPresent = currentList.firstOrNull { it.lineNumber == task.lineNumber && !it.isCompleted }
+                if (stillPresent != null) {
+                    undoSnapshot = currentList
+                    val (doneTask, nextRec) = TodoParser.markCompleted(stillPresent, LocalDate.now())
+                    val nextList = currentList.map {
+                        if (it.lineNumber == stillPresent.lineNumber) doneTask else it
+                    } + listOfNotNull(nextRec?.copy(lineNumber = currentList.size + 1))
+                    persistAndSchedule(nextList)
+                }
+                completingFlashKeys = completingFlashKeys - flashKey
+            }
+        }
+    }
+
     fun reloadAllFromSafOrDisk(customSafUriStr: String? = null, switchToTasksTab: Boolean = false) {
         coroutineScope.launch(Dispatchers.IO) {
             val res = storageRepo.loadAllFromSafFolder(customSafUriStr)
             val latestBaks = storageRepo.getTodoBackupCount()
             scheduler.syncTaskSchedules(res.tasks, ZonedDateTime.now(), forceAll = true)
+            TickAsciiWidgetProvider.refreshAllWidgets(context)
             withContext(Dispatchers.Main) {
                 tasks = res.tasks
                 doneLines = res.doneLines
@@ -409,6 +520,7 @@ fun MainScreen(
     }
 
     fun openNoteInPopup(note: NoteFile, startInEditMode: Boolean = false) {
+        haptics.tap()
         activeNotePopupFilename = note.filename
         noteDraftName = note.filename
         noteDraftText = note.bodyContent
@@ -424,7 +536,7 @@ fun MainScreen(
         if (target != null) {
             openNoteInPopup(target, startInEditMode = false)
         } else {
-            // Create a new note pre-titled with the linked filename
+            haptics.tap()
             activeNotePopupFilename = NEW_NOTE_SENTINEL
             noteDraftName = normalized
             noteDraftText = "# ${normalized.substringBeforeLast('.')}\n\n"
@@ -433,6 +545,7 @@ fun MainScreen(
     }
 
     fun createAndOpenNewMarkdownNote() {
+        haptics.tap()
         activeNotePopupFilename = NEW_NOTE_SENTINEL
         noteDraftName = ""
         noteDraftText = ""
@@ -452,6 +565,7 @@ fun MainScreen(
             return
         }
 
+        haptics.confirm()
         val derivedNameSource = when {
             trimmedTitle.isNotEmpty() -> trimmedTitle
             currentOrigin != NEW_NOTE_SENTINEL -> currentOrigin
@@ -486,10 +600,6 @@ fun MainScreen(
         }
     }
 
-    // Lifecycle sync:
-    // - Never blindly overwrite SAF todo.txt on ON_PAUSE/ON_STOP (tasks already persist on every mutation).
-    // - Flush only an open unsaved note draft once on ON_STOP.
-    // - Reload external edits on ON_RESUME after initial hydration.
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
@@ -541,6 +651,7 @@ fun MainScreen(
                         val msg = intent.getStringExtra("extra_status_msg") ?: "Updated todo.txt"
                         coroutineScope.launch(Dispatchers.IO) {
                             val freshTasks = storageRepo.loadTasks()
+                            TickAsciiWidgetProvider.refreshAllWidgets(context)
                             withContext(Dispatchers.Main) {
                                 tasks = freshTasks
                                 statusBanner = msg
@@ -575,6 +686,7 @@ fun MainScreen(
         when {
             showEditDueDateWheel -> showEditDueDateWheel = false
             showAddDueDateWheel -> showAddDueDateWheel = false
+            rawEditorKind != null -> rawEditorKind = null
             activeAlarmOverlay != null -> {
                 val alarm = activeAlarmOverlay!!
                 AlarmAudioController.stopAll()
@@ -589,9 +701,13 @@ fun MainScreen(
                 activeAlarmOverlay = null
             }
             editingTask != null -> editingTask = null
-            showAddTaskPopup -> showAddTaskPopup = false
+            showAddTaskPopup -> {
+                showAddTaskPopup = false
+                sessionAddedCount = 0
+            }
             activeNotePopupFilename != null -> commitNoteDraftAndClose(closePopup = true)
             showTagsPopup -> showTagsPopup = false
+            expandedTriageKey != null -> expandedTriageKey = null
             showSearchBar -> {
                 searchQuery = ""
                 showSearchBar = false
@@ -634,9 +750,9 @@ fun MainScreen(
         else SmartAddParser.parse(smartInput, currentNow, activeRules, disabledSpans)
     }
 
-    fun submitSmartAdd() {
+    fun submitSmartAdd(keepOpen: Boolean = false) {
         val res = parsePreview ?: return
-        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        haptics.confirm()
         if (res.isNoteCapture) {
             val fn = NotesRepository.toHumanReadableFilename(res.noteTitle ?: "quick-note", ".md")
             val content = "# ${res.strippedTitle}\n"
@@ -650,9 +766,14 @@ fun MainScreen(
             addTaskPriority = null
             disabledSpans = emptySet()
             dismissedInferredTags = emptySet()
-            showAddTaskPopup = false
-            focusManager.clearFocus()
-            coroutineScope.launch { pagerState.animateScrollToPage(1) }
+            if (keepOpen) {
+                sessionAddedCount += 1
+            } else {
+                sessionAddedCount = 0
+                showAddTaskPopup = false
+                focusManager.clearFocus()
+                coroutineScope.launch { pagerState.animateScrollToPage(1) }
+            }
         } else {
             var newTask = TodoParser.parseLine(res.formattedTodoLine, tasks.size + 1)
             if (dismissedInferredTags.isNotEmpty()) {
@@ -668,7 +789,6 @@ fun MainScreen(
             if (addTaskPriority != null && newTask.priority == null) {
                 newTask = newTask.copy(priority = addTaskPriority, isDirty = true)
             }
-            // Preserve explicit/NLP-parsed `rem:` specs and respect `don't remind me` suppression
             val chosenSpec = if (newTask.reminderSpecs.isNotEmpty()) {
                 newTask.reminderSpecs.first()
             } else {
@@ -690,8 +810,14 @@ fun MainScreen(
             addTaskPriority = null
             disabledSpans = emptySet()
             dismissedInferredTags = emptySet()
-            showAddTaskPopup = false
-            focusManager.clearFocus()
+            if (keepOpen) {
+                sessionAddedCount += 1
+                runCatching { addInputFocusRequester.requestFocus() }
+            } else {
+                sessionAddedCount = 0
+                showAddTaskPopup = false
+                focusManager.clearFocus()
+            }
         }
     }
 
@@ -730,6 +856,53 @@ fun MainScreen(
         )
     }
 
+    // Build sectioned Open list (Overdue / Today / Upcoming / Someday) with zero extra tabs
+    val taskListEntries = remember(filteredTasks, activeFilter, searchQuery, currentNow, palette) {
+        if (activeFilter != "open" || searchQuery.isNotBlank() || filteredTasks.isEmpty()) {
+            filteredTasks.map { TaskListEntry.TaskRow(it) }
+        } else {
+            val overdue = mutableListOf<TodoTask>()
+            val dueToday = mutableListOf<TodoTask>()
+            val upcoming = mutableListOf<TodoTask>()
+            val someday = mutableListOf<TodoTask>()
+
+            for (t in filteredTasks) {
+                val d = t.dueDate
+                when {
+                    d == null -> someday.add(t)
+                    d.isBefore(todayDate) -> overdue.add(t)
+                    d == todayDate && t.dueTime != null && LocalDateTime.of(d, t.dueTime!!).isBefore(currentNow) -> overdue.add(t)
+                    d == todayDate -> dueToday.add(t)
+                    else -> upcoming.add(t)
+                }
+            }
+
+            val nonEmptyBuckets = listOf(overdue, dueToday, upcoming, someday).count { it.isNotEmpty() }
+            if (nonEmptyBuckets <= 1 && overdue.isEmpty()) {
+                filteredTasks.map { TaskListEntry.TaskRow(it) }
+            } else {
+                buildList {
+                    if (overdue.isNotEmpty()) {
+                        add(TaskListEntry.SectionHeader("overdue", "! OVERDUE (${overdue.size})", palette.priorityA))
+                        overdue.forEach { add(TaskListEntry.TaskRow(it)) }
+                    }
+                    if (dueToday.isNotEmpty()) {
+                        add(TaskListEntry.SectionHeader("today", "* TODAY (${dueToday.size})", palette.reminder))
+                        dueToday.forEach { add(TaskListEntry.TaskRow(it)) }
+                    }
+                    if (upcoming.isNotEmpty()) {
+                        add(TaskListEntry.SectionHeader("upcoming", "UPCOMING (${upcoming.size})", palette.priorityB))
+                        upcoming.forEach { add(TaskListEntry.TaskRow(it)) }
+                    }
+                    if (someday.isNotEmpty()) {
+                        add(TaskListEntry.SectionHeader("someday", "SOMEDAY (${someday.size})", palette.fgMuted))
+                        someday.forEach { add(TaskListEntry.TaskRow(it)) }
+                    }
+                }
+            }
+        }
+    }
+
     val filteredNotes = remember(notes, searchQuery, matchedNoteHits) {
         if (searchQuery.isBlank()) {
             notes
@@ -751,6 +924,23 @@ fun MainScreen(
         counts
     }
 
+    // Daily scoreboard counts (today's completed + open tasks)
+    val completedTodayCount = remember(tasks, doneLines, todayDate) {
+        val todayPrefix = "x $todayDate"
+        val inTodo = tasks.count { it.isCompleted && it.completionDate == todayDate }
+        val inDone = doneLines.count { it.trimStart().startsWith(todayPrefix) }
+        inTodo + inDone
+    }
+    val activeOpenCount = remember(tasks, todayDate) {
+        tasks.count {
+            !it.isBlankOrComment && !it.isCompleted &&
+                (it.thresholdDate == null || !it.thresholdDate!!.isAfter(todayDate))
+        }
+    }
+    val headerDateLabel = remember(todayDate) {
+        todayDate.format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH))
+    }
+
     // =========================================================================
     // FULL-SCREEN 3-OPTION NOTIFICATION OVERLAY
     // =========================================================================
@@ -761,6 +951,7 @@ fun MainScreen(
             rawSpec = alarm.rawSpec,
             fontSizeSp = fontScaleSp,
             onSnoozeWithPreset = { presetSpec ->
+                haptics.confirm()
                 AlarmAudioController.stopAll()
                 cancelShadeNotification(alarm.notifId)
                 val targetZdt = ReminderScheduleCalculator.computeSnoozeTarget(ZonedDateTime.now(), presetSpec)
@@ -785,6 +976,7 @@ fun MainScreen(
                 activeAlarmOverlay = null
             },
             onDismiss = {
+                haptics.tap()
                 AlarmAudioController.stopAll()
                 AlarmBroadcastReceiver.postTrayNotificationOnDismiss(
                     context = context,
@@ -797,6 +989,7 @@ fun MainScreen(
                 activeAlarmOverlay = null
             },
             onMarkDone = {
+                haptics.confirm()
                 AlarmAudioController.stopAll()
                 cancelShadeNotification(alarm.notifId)
                 undoSnapshot = tasks
@@ -816,6 +1009,7 @@ fun MainScreen(
     }
 
     val latestTasks by rememberUpdatedState(tasks)
+    val latestDoneLines by rememberUpdatedState(doneLines)
 
     Box(
         modifier = Modifier
@@ -825,6 +1019,35 @@ fun MainScreen(
             .navigationBarsPadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
+            // =================================================================
+            // DAILY SCOREBOARD MICRO-HEADER (`t█ tick.txt  [3/7 done]  Sat 21 Nov`)
+            // =================================================================
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = buildAnnotatedString {
+                        withStyle(SpanStyle(color = palette.fg, fontWeight = FontWeight.Bold)) { append("tick") }
+                        withStyle(SpanStyle(color = palette.project, fontWeight = FontWeight.Bold)) { append(".txt") }
+                    },
+                    fontSize = 12.sp,
+                    fontFamily = monoFont
+                )
+                val totalTodayPool = completedTodayCount + activeOpenCount
+                val scoreColor = if (completedTodayCount > 0 && activeOpenCount == 0) palette.reminder else palette.fgMuted
+                Text(
+                    text = "[$completedTodayCount/$totalTodayPool done]  $headerDateLabel",
+                    color = scoreColor,
+                    fontSize = 11.sp,
+                    fontFamily = monoFont,
+                    fontWeight = if (completedTodayCount > 0 && activeOpenCount == 0) FontWeight.Bold else FontWeight.Normal
+                )
+            }
+
             // =================================================================
             // SWIPEABLE HORIZONTAL PAGER FOR TABS (Tasks <-> Notes <-> Settings)
             // =================================================================
@@ -841,7 +1064,7 @@ fun MainScreen(
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                                    .padding(horizontal = 12.dp, vertical = 2.dp)
                             ) {
                                 val isTagFiltered = activeFilter.startsWith("+") || activeFilter.startsWith("@")
                                 val tagButtonLabel = if (isTagFiltered) " $activeFilter " else "[+@]"
@@ -859,15 +1082,14 @@ fun MainScreen(
                                         fontSize = 12.sp,
                                         fontFamily = monoFont
                                     )
+                                    // Horizontally scrollable at large font sizes so items never crowd/clip
                                     Row(
-                                        modifier = Modifier.weight(1f),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        val openTabCount = tasks.count {
-                                            !it.isBlankOrComment && !it.isCompleted &&
-                                                (it.thresholdDate == null || !it.thresholdDate!!.isAfter(todayDate))
-                                        }
                                         val allTabCount = tasks.count { !it.isBlankOrComment }
                                         val dueTabCount = tasks.count {
                                             !it.isBlankOrComment && !it.isCompleted && it.dueDate != null &&
@@ -876,7 +1098,7 @@ fun MainScreen(
                                         val doneTabCount = tasks.count { !it.isBlankOrComment && it.isCompleted }
 
                                         listOf(
-                                            "open" to (if (openTabCount > 0) "Open($openTabCount)" else "Open"),
+                                            "open" to (if (activeOpenCount > 0) "Open($activeOpenCount)" else "Open"),
                                             "all" to (if (allTabCount > 0) "All($allTabCount)" else "All"),
                                             "due" to (if (dueTabCount > 0) "Due($dueTabCount)" else "Due"),
                                             "done" to (if (doneTabCount > 0) "Done($doneTabCount)" else "Done")
@@ -888,13 +1110,16 @@ fun MainScreen(
                                                 fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
                                                 fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
                                                 fontFamily = appFont,
+                                                softWrap = false,
+                                                maxLines = 1,
                                                 modifier = Modifier
                                                     .then(if (active) Modifier.background(palette.project) else Modifier)
                                                     .clickable {
+                                                        haptics.tap()
                                                         searchQuery = ""
                                                         updateFilterWithHistory(fKey)
                                                     }
-                                                    .padding(vertical = 2.dp, horizontal = 2.dp)
+                                                    .padding(vertical = 4.dp, horizontal = 3.dp)
                                             )
                                         }
 
@@ -904,10 +1129,15 @@ fun MainScreen(
                                             fontWeight = FontWeight.Bold,
                                             fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
                                             fontFamily = appFont,
+                                            softWrap = false,
+                                            maxLines = 1,
                                             modifier = Modifier
                                                 .then(if (isTagFiltered) Modifier.background(palette.contextTag) else Modifier)
-                                                .clickable { showTagsPopup = true }
-                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                                .clickable {
+                                                    haptics.tap()
+                                                    showTagsPopup = true
+                                                }
+                                                .padding(vertical = 4.dp, horizontal = 3.dp)
                                         )
 
                                         val searchActive = showSearchBar || searchQuery.isNotBlank()
@@ -917,13 +1147,16 @@ fun MainScreen(
                                             fontWeight = FontWeight.Bold,
                                             fontSize = (fontScaleSp - 2).coerceAtLeast(12).sp,
                                             fontFamily = monoFont,
+                                            softWrap = false,
+                                            maxLines = 1,
                                             modifier = Modifier
                                                 .then(if (searchActive) Modifier.background(palette.reminder) else Modifier)
                                                 .clickable {
+                                                    haptics.tap()
                                                     showSearchBar = !showSearchBar
                                                     if (!showSearchBar) searchQuery = ""
                                                 }
-                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                                .padding(vertical = 4.dp, horizontal = 3.dp)
                                         )
                                     }
                                     Text(
@@ -952,7 +1185,7 @@ fun MainScreen(
                                         Box(
                                             modifier = Modifier
                                                 .weight(1f)
-                                                .padding(vertical = 2.dp),
+                                                .padding(vertical = 4.dp),
                                             contentAlignment = Alignment.CenterStart
                                         ) {
                                             if (searchQuery.isEmpty()) {
@@ -989,11 +1222,12 @@ fun MainScreen(
                                             fontFamily = monoFont,
                                             modifier = Modifier
                                                 .clickable {
+                                                    haptics.tap()
                                                     searchQuery = ""
                                                     showSearchBar = false
                                                     focusManager.clearFocus()
                                                 }
-                                                .padding(horizontal = 4.dp)
+                                                .padding(horizontal = 6.dp, vertical = 4.dp)
                                         )
                                         Text(
                                             text = " |",
@@ -1032,10 +1266,12 @@ fun MainScreen(
                                         fontSizeSp = (fontScaleSp - 2).coerceAtLeast(11),
                                         boldRight = true,
                                         onClick = {
+                                            haptics.confirm()
                                             undoSnapshot = tasks
                                             coroutineScope.launch(Dispatchers.IO) {
                                                 val (remaining, newDone, count) = storageRepo.archiveCompletedTasks(tasks, doneLines)
                                                 scheduler.syncTaskSchedules(remaining, ZonedDateTime.now())
+                                                TickAsciiWidgetProvider.refreshAllWidgets(context)
                                                 val bCount = storageRepo.getTodoBackupCount()
                                                 withContext(Dispatchers.Main) {
                                                     tasks = remaining
@@ -1058,7 +1294,7 @@ fun MainScreen(
                                     contentPadding = PaddingValues(bottom = 58.dp),
                                     verticalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
-                                    if (filteredTasks.isEmpty() && isInitialLoadDone) {
+                                    if (taskListEntries.isEmpty() && isInitialLoadDone) {
                                         item {
                                             Column(
                                                 modifier = Modifier
@@ -1119,110 +1355,164 @@ fun MainScreen(
                                                     leftColor = palette.fg,
                                                     rightColor = palette.reminder,
                                                     boldRight = true,
-                                                    onClick = { showAddTaskPopup = true }
+                                                    onClick = {
+                                                        haptics.tap()
+                                                        sessionAddedCount = 0
+                                                        showAddTaskPopup = true
+                                                    }
                                                 )
                                                 AsciiHorizontalBorder()
                                             }
                                         }
                                     } else {
-                                        items(filteredTasks, key = { "${it.lineNumber}:${it.rawLine}" }) { task ->
-                                            val dismissState = rememberSwipeToDismissBoxState(
-                                                confirmValueChange = { targetValue ->
-                                                    val currentTasks = latestTasks
-                                                    when (targetValue) {
-                                                        SwipeToDismissBoxValue.StartToEnd -> {
-                                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                            undoSnapshot = currentTasks
-                                                            val updated = if (task.isCompleted) {
-                                                                TodoParser.markIncomplete(task) to null
-                                                            } else {
-                                                                TodoParser.markCompleted(task, LocalDate.now())
-                                                            }
-                                                            val nextList = currentTasks.map {
-                                                                if (it.lineNumber == task.lineNumber) updated.first else it
-                                                            } + listOfNotNull(
-                                                                updated.second?.copy(lineNumber = currentTasks.size + 1)
-                                                            )
-                                                            persistAndSchedule(nextList)
-                                                            statusBanner = if (task.isCompleted) "[< Reopen] ${task.description}" else "[x Done] ${task.description}"
-                                                            false
-                                                        }
-                                                        SwipeToDismissBoxValue.EndToStart -> {
-                                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                            undoSnapshot = currentTasks
-                                                            persistAndSchedule(currentTasks.filterNot { it.lineNumber == task.lineNumber })
-                                                            statusBanner = "[X Delete] ${task.description}"
-                                                            true
-                                                        }
-                                                        SwipeToDismissBoxValue.Settled -> false
-                                                    }
+                                        items(taskListEntries, key = { it.listKey }) { entry ->
+                                            when (entry) {
+                                                is TaskListEntry.SectionHeader -> {
+                                                    AsciiSectionDivider(
+                                                        title = entry.title,
+                                                        accentColor = entry.color
+                                                    )
                                                 }
-                                            )
-
-                                            SwipeToDismissBox(
-                                                state = dismissState,
-                                                backgroundContent = {
-                                                    val dir = dismissState.dismissDirection
-                                                    val bgText = when (dir) {
-                                                        SwipeToDismissBoxValue.StartToEnd -> "| [x Done] >>>"
-                                                        SwipeToDismissBoxValue.EndToStart -> "<<< [X Delete] |"
-                                                        else -> ""
-                                                    }
-                                                    val bgColor = when (dir) {
-                                                        SwipeToDismissBoxValue.StartToEnd -> palette.reminder
-                                                        SwipeToDismissBoxValue.EndToStart -> palette.priorityA
-                                                        else -> palette.fgMuted
-                                                    }
-                                                    val align = when (dir) {
-                                                        SwipeToDismissBoxValue.StartToEnd -> Alignment.CenterStart
-                                                        else -> Alignment.CenterEnd
-                                                    }
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .fillMaxSize()
-                                                            .background(palette.bgElevated)
-                                                            .padding(horizontal = 12.dp),
-                                                        contentAlignment = align
-                                                    ) {
-                                                        Text(
-                                                            text = bgText,
-                                                            color = bgColor,
-                                                            fontWeight = FontWeight.Bold,
-                                                            fontSize = fontScaleSp.sp,
-                                                            fontFamily = monoFont
-                                                        )
-                                                    }
-                                                },
-                                                content = {
-                                                    UsableTaskCard(
-                                                        task = task,
-                                                        currentNow = currentNow,
-                                                        fontSizeSp = fontScaleSp,
-                                                        onToggleDone = {
-                                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                            undoSnapshot = tasks
-                                                            val updated = if (task.isCompleted) {
-                                                                TodoParser.markIncomplete(task) to null
-                                                            } else {
-                                                                TodoParser.markCompleted(task, LocalDate.now())
+                                                is TaskListEntry.TaskRow -> {
+                                                    val task = entry.task
+                                                    val rowKey = entry.listKey
+                                                    val dismissState = rememberSwipeToDismissBoxState(
+                                                        confirmValueChange = { targetValue ->
+                                                            val currentTasks = latestTasks
+                                                            when (targetValue) {
+                                                                SwipeToDismissBoxValue.StartToEnd -> {
+                                                                    haptics.confirm()
+                                                                    undoSnapshot = currentTasks
+                                                                    val updated = if (task.isCompleted) {
+                                                                        TodoParser.markIncomplete(task) to null
+                                                                    } else {
+                                                                        TodoParser.markCompleted(task, LocalDate.now())
+                                                                    }
+                                                                    val nextList = currentTasks.map {
+                                                                        if (it.lineNumber == task.lineNumber) updated.first else it
+                                                                    } + listOfNotNull(
+                                                                        updated.second?.copy(lineNumber = currentTasks.size + 1)
+                                                                    )
+                                                                    persistAndSchedule(nextList)
+                                                                    statusBanner = if (task.isCompleted) "[< Reopen] ${task.description}" else "[x Done] ${task.description}"
+                                                                    false
+                                                                }
+                                                                SwipeToDismissBoxValue.EndToStart -> {
+                                                                    // Safer swipe-left: bump +1d tomorrow for open tasks, archive for done tasks
+                                                                    if (!task.isCompleted) {
+                                                                        haptics.confirm()
+                                                                        bumpTaskDueDateByOneDay(task, currentTasks)
+                                                                        false
+                                                                    } else {
+                                                                        haptics.confirm()
+                                                                        undoSnapshot = currentTasks
+                                                                        val remaining = currentTasks.filterNot { it.lineNumber == task.lineNumber }
+                                                                        val serialized = TodoParser.serializeLine(task).trim()
+                                                                        val newDone = (latestDoneLines + serialized).distinct()
+                                                                        coroutineScope.launch(Dispatchers.IO) {
+                                                                            storageRepo.saveDoneLines(newDone)
+                                                                        }
+                                                                        doneLines = newDone
+                                                                        persistAndSchedule(remaining)
+                                                                        statusBanner = "[x Archive] ${task.description}"
+                                                                        true
+                                                                    }
+                                                                }
+                                                                SwipeToDismissBoxValue.Settled -> false
                                                             }
-                                                            val nextList = tasks.map {
-                                                                if (it.lineNumber == task.lineNumber) updated.first else it
-                                                            } + listOfNotNull(
-                                                                updated.second?.copy(lineNumber = tasks.size + 1)
+                                                        }
+                                                    )
+
+                                                    SwipeToDismissBox(
+                                                        state = dismissState,
+                                                        backgroundContent = {
+                                                            val dir = dismissState.dismissDirection
+                                                            val bgText = when (dir) {
+                                                                SwipeToDismissBoxValue.StartToEnd ->
+                                                                    if (task.isCompleted) "| [< Reopen] >>>" else "| [x Done] >>>"
+                                                                SwipeToDismissBoxValue.EndToStart ->
+                                                                    if (task.isCompleted) "<<< [x Archive] |" else "<<< [+1d Tomorrow] |"
+                                                                else -> ""
+                                                            }
+                                                            val bgColor = when (dir) {
+                                                                SwipeToDismissBoxValue.StartToEnd -> palette.reminder
+                                                                SwipeToDismissBoxValue.EndToStart ->
+                                                                    if (task.isCompleted) palette.contextTag else palette.priorityB
+                                                                else -> palette.fgMuted
+                                                            }
+                                                            val align = when (dir) {
+                                                                SwipeToDismissBoxValue.StartToEnd -> Alignment.CenterStart
+                                                                else -> Alignment.CenterEnd
+                                                            }
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .fillMaxSize()
+                                                                    .background(palette.bgElevated)
+                                                                    .padding(horizontal = 12.dp),
+                                                                contentAlignment = align
+                                                            ) {
+                                                                Text(
+                                                                    text = bgText,
+                                                                    color = bgColor,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    fontSize = fontScaleSp.sp,
+                                                                    fontFamily = monoFont
+                                                                )
+                                                            }
+                                                        },
+                                                        content = {
+                                                            UsableTaskCard(
+                                                                task = task,
+                                                                currentNow = currentNow,
+                                                                fontSizeSp = fontScaleSp,
+                                                                isCompletingFlash = rowKey in completingFlashKeys,
+                                                                isTriageExpanded = expandedTriageKey == rowKey,
+                                                                onToggleDone = { toggleTaskCompletionWithFlash(task) },
+                                                                onTapTask = {
+                                                                    expandedTriageKey = null
+                                                                    editingTask = task
+                                                                    editingTaskDraft = TodoParser.serializeLine(task)
+                                                                },
+                                                                onLongPressTask = {
+                                                                    expandedTriageKey = if (expandedTriageKey == rowKey) null else rowKey
+                                                                },
+                                                                onQuickBumpTomorrow = {
+                                                                    expandedTriageKey = null
+                                                                    haptics.confirm()
+                                                                    bumpTaskDueDateByOneDay(task, tasks)
+                                                                },
+                                                                onQuickSetPriority = { newPri ->
+                                                                    expandedTriageKey = null
+                                                                    haptics.confirm()
+                                                                    undoSnapshot = tasks
+                                                                    val updated = task.copy(priority = newPri, isDirty = true)
+                                                                    persistAndSchedule(
+                                                                        tasks.map { if (it.lineNumber == task.lineNumber) updated else it }
+                                                                    )
+                                                                    statusBanner = if (newPri != null) "[($newPri)] ${task.description}" else "[Pri cleared] ${task.description}"
+                                                                },
+                                                                onQuickCopy = {
+                                                                    expandedTriageKey = null
+                                                                    haptics.confirm()
+                                                                    clipboardManager.setText(AnnotatedString(TodoParser.serializeLine(task)))
+                                                                    statusBanner = "[Copy] Copied todo.txt line"
+                                                                },
+                                                                onQuickDelete = {
+                                                                    expandedTriageKey = null
+                                                                    haptics.reject()
+                                                                    undoSnapshot = tasks
+                                                                    persistAndSchedule(tasks.filterNot { it.lineNumber == task.lineNumber })
+                                                                    statusBanner = "[X Delete] ${task.description}"
+                                                                },
+                                                                onOpenLinkedNote = { noteRef ->
+                                                                    expandedTriageKey = null
+                                                                    openLinkedNoteByName(noteRef)
+                                                                }
                                                             )
-                                                            persistAndSchedule(nextList)
-                                                        },
-                                                        onTapTask = {
-                                                            editingTask = task
-                                                            editingTaskDraft = TodoParser.serializeLine(task)
-                                                        },
-                                                        onOpenLinkedNote = { noteRef ->
-                                                            openLinkedNoteByName(noteRef)
                                                         }
                                                     )
                                                 }
-                                            )
+                                            }
                                         }
                                     }
                                 }
@@ -1245,6 +1535,7 @@ fun MainScreen(
                                         fontSizeSp = (fontScaleSp - 2).coerceAtLeast(11),
                                         boldRight = true,
                                         onClick = {
+                                            haptics.confirm()
                                             if (undoSnapshot != null) {
                                                 persistAndSchedule(undoSnapshot!!)
                                                 undoSnapshot = null
@@ -1265,7 +1556,10 @@ fun MainScreen(
                             }
 
                             AsciiFloatingAddButton(
-                                onClick = { showAddTaskPopup = true },
+                                onClick = {
+                                    sessionAddedCount = 0
+                                    showAddTaskPopup = true
+                                },
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
                                     .padding(end = 12.dp, bottom = 6.dp)
@@ -1279,7 +1573,7 @@ fun MainScreen(
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                                    .padding(horizontal = 12.dp, vertical = 2.dp)
                             ) {
                                 AsciiHorizontalBorder()
                                 Row(
@@ -1314,8 +1608,11 @@ fun MainScreen(
                                             fontFamily = appFont,
                                             modifier = Modifier
                                                 .then(if (notesTwoColumnMode) Modifier.background(palette.project) else Modifier)
-                                                .clickable { notesTwoColumnMode = true }
-                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                                .clickable {
+                                                    haptics.tap()
+                                                    notesTwoColumnMode = true
+                                                }
+                                                .padding(vertical = 4.dp, horizontal = 3.dp)
                                         )
                                         Text(
                                             text = if (!notesTwoColumnMode) " 1-Col " else "1-Col",
@@ -1325,8 +1622,11 @@ fun MainScreen(
                                             fontFamily = appFont,
                                             modifier = Modifier
                                                 .then(if (!notesTwoColumnMode) Modifier.background(palette.project) else Modifier)
-                                                .clickable { notesTwoColumnMode = false }
-                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                                .clickable {
+                                                    haptics.tap()
+                                                    notesTwoColumnMode = false
+                                                }
+                                                .padding(vertical = 4.dp, horizontal = 3.dp)
                                         )
                                         val noteSearchActive = showSearchBar || searchQuery.isNotBlank()
                                         Text(
@@ -1338,10 +1638,11 @@ fun MainScreen(
                                             modifier = Modifier
                                                 .then(if (noteSearchActive) Modifier.background(palette.reminder) else Modifier)
                                                 .clickable {
+                                                    haptics.tap()
                                                     showSearchBar = !showSearchBar
                                                     if (!showSearchBar) searchQuery = ""
                                                 }
-                                                .padding(vertical = 2.dp, horizontal = 2.dp)
+                                                .padding(vertical = 4.dp, horizontal = 3.dp)
                                         )
                                     }
                                     Text(
@@ -1370,7 +1671,7 @@ fun MainScreen(
                                         Box(
                                             modifier = Modifier
                                                 .weight(1f)
-                                                .padding(vertical = 2.dp),
+                                                .padding(vertical = 4.dp),
                                             contentAlignment = Alignment.CenterStart
                                         ) {
                                             if (searchQuery.isEmpty()) {
@@ -1407,11 +1708,12 @@ fun MainScreen(
                                             fontFamily = monoFont,
                                             modifier = Modifier
                                                 .clickable {
+                                                    haptics.tap()
                                                     searchQuery = ""
                                                     showSearchBar = false
                                                     focusManager.clearFocus()
                                                 }
-                                                .padding(horizontal = 4.dp)
+                                                .padding(horizontal = 6.dp, vertical = 4.dp)
                                         )
                                         Text(
                                             text = " |",
@@ -1475,7 +1777,7 @@ fun MainScreen(
                                                 backlinkCount = noteBacklinkCounts[note.filename.lowercase()] ?: 0,
                                                 onTapCard = { openNoteInPopup(note, startInEditMode = false) },
                                                 onToggleChecklistLine = { lineIdx ->
-                                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    haptics.toggle()
                                                     val toggledBody = toggleMarkdownCheckboxAtLine(note.bodyContent, lineIdx)
                                                     coroutineScope.launch(Dispatchers.IO) {
                                                         val saved = storageRepo.saveNote(note.filename, toggledBody)
@@ -1504,6 +1806,7 @@ fun MainScreen(
                                         fontSizeSp = (fontScaleSp - 2).coerceAtLeast(11),
                                         boldRight = true,
                                         onClick = {
+                                            haptics.confirm()
                                             if (undoDeletedNote != null) {
                                                 val (restoredName, restoredBody) = undoDeletedNote!!
                                                 undoDeletedNote = null
@@ -1542,6 +1845,7 @@ fun MainScreen(
                                     coroutineScope.launch(Dispatchers.IO) {
                                         val (syncedList, count) = gcalManager.syncAllDueTasks(tasks)
                                         withContext(Dispatchers.Main) {
+                                            haptics.confirm()
                                             persistAndSchedule(syncedList)
                                             statusBanner = "[# GCal] Synced $count task(s)"
                                         }
@@ -1572,13 +1876,23 @@ fun MainScreen(
                                     }
                                 }
                             },
+                            onEditRulesFile = {
+                                rawEditorDraft = rulesText
+                                rawEditorKind = "rules"
+                            },
+                            onEditRawTodoFile = {
+                                rawEditorDraft = TodoParser.serializeFile(tasks)
+                                rawEditorKind = "todo"
+                            },
                             onArchiveCompletedTasks = {
                                 val completed = tasks.filter { it.isCompleted }
                                 if (completed.isNotEmpty()) {
+                                    haptics.confirm()
                                     undoSnapshot = tasks
                                     coroutineScope.launch(Dispatchers.IO) {
                                         val (remaining, newDone, count) = storageRepo.archiveCompletedTasks(tasks, doneLines)
                                         scheduler.syncTaskSchedules(remaining, ZonedDateTime.now())
+                                        TickAsciiWidgetProvider.refreshAllWidgets(context)
                                         val bCount = storageRepo.getTodoBackupCount()
                                         withContext(Dispatchers.Main) {
                                             tasks = remaining
@@ -1595,13 +1909,16 @@ fun MainScreen(
                                     val bCount = storageRepo.getTodoBackupCount()
                                     if (restored != null) {
                                         scheduler.syncTaskSchedules(restored, ZonedDateTime.now(), forceAll = true)
+                                        TickAsciiWidgetProvider.refreshAllWidgets(context)
                                         withContext(Dispatchers.Main) {
+                                            haptics.confirm()
                                             tasks = restored
                                             backupCount = bCount
                                             statusBanner = "[< Backup] Restored ${restored.size} task(s)"
                                         }
                                     } else {
                                         withContext(Dispatchers.Main) {
+                                            haptics.reject()
                                             backupCount = bCount
                                             statusBanner = "[< Backup] No backup snapshots available"
                                         }
@@ -1609,6 +1926,7 @@ fun MainScreen(
                                 }
                             },
                             onFireImmediateNotification = {
+                                haptics.confirm()
                                 triggerFullNotification(
                                     taskTitle = "(A) review architecture notes +work @desk rem:0m/n",
                                     rawSpec = "0m/n",
@@ -1629,15 +1947,11 @@ fun MainScreen(
                     .background(palette.bg)
                     .padding(horizontal = 12.dp, vertical = 4.dp)
             ) {
-                val openCount = tasks.count {
-                    !it.isBlankOrComment && !it.isCompleted &&
-                        (it.thresholdDate == null || !it.thresholdDate!!.isAfter(todayDate))
-                }
                 AsciiHorizontalBorder()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 3.dp),
+                        .padding(vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -1652,7 +1966,7 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         listOf(
-                            0 to "Tasks ($openCount)",
+                            0 to "Tasks ($activeOpenCount)",
                             1 to "Notes (${notes.size})",
                             2 to "Settings"
                         ).forEach { (tabIdx, tabLabel) ->
@@ -1666,14 +1980,16 @@ fun MainScreen(
                                 modifier = Modifier
                                     .then(if (selected) Modifier.background(palette.project) else Modifier)
                                     .clickable {
+                                        haptics.tap()
                                         statusBanner = null
                                         editingTask = null
                                         showAddTaskPopup = false
                                         activeNotePopupFilename = null
                                         showTagsPopup = false
+                                        expandedTriageKey = null
                                         coroutineScope.launch { pagerState.animateScrollToPage(tabIdx) }
                                     }
-                                    .padding(vertical = 3.dp, horizontal = 4.dp)
+                                    .padding(vertical = 6.dp, horizontal = 5.dp)
                             )
                         }
                     }
@@ -1691,6 +2007,43 @@ fun MainScreen(
         // =====================================================================
         // MODAL OVERLAYS
         // =====================================================================
+        if (rawEditorKind != null) {
+            val isRules = rawEditorKind == "rules"
+            RawTextEditorDialog(
+                titleBadge = if (isRules) "~ tick.rules.txt" else "# RAW todo.txt",
+                subtitleHint = if (isRules) {
+                    "Customize time defaults (morning/eod) & keyword -> +project / @context rules."
+                } else {
+                    "Direct plain-text todo.txt editor -- one task per line."
+                },
+                draftText = rawEditorDraft,
+                fontSizeSp = fontScaleSp,
+                onDraftChange = { rawEditorDraft = it },
+                onSave = {
+                    haptics.confirm()
+                    if (isRules) {
+                        val updatedRules = rawEditorDraft
+                        rulesText = updatedRules
+                        rawEditorKind = null
+                        statusBanner = "[~ Rules] Saved tick.rules.txt"
+                        coroutineScope.launch(Dispatchers.IO) {
+                            storageRepo.saveRulesText(updatedRules)
+                        }
+                    } else {
+                        val reparsed = TodoParser.parseFile(rawEditorDraft)
+                        undoSnapshot = tasks
+                        rawEditorKind = null
+                        persistAndSchedule(reparsed)
+                        statusBanner = "[# Raw] Saved ${reparsed.count { !it.isBlankOrComment }} task(s)"
+                    }
+                },
+                onDismiss = {
+                    haptics.tap()
+                    rawEditorKind = null
+                }
+            )
+        }
+
         if (activeNotePopupFilename != null) {
             val isNewNoteDraft = activeNotePopupFilename == NEW_NOTE_SENTINEL
             val currentNote = notes.firstOrNull { it.filename == activeNotePopupFilename }
@@ -1716,7 +2069,7 @@ fun MainScreen(
                 onNoteDraftTextChange = { noteDraftText = it },
                 onSetEditMode = { noteEditMode = it },
                 onTogglePreviewCheckbox = { idx ->
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    haptics.toggle()
                     val toggled = toggleMarkdownCheckboxAtLine(noteDraftText, idx)
                     noteDraftText = toggled
                     val origin = activeNotePopupFilename
@@ -1735,6 +2088,7 @@ fun MainScreen(
                 onCommitAndKeepOpen = { commitNoteDraftAndClose(closePopup = false) },
                 onCommitAndClose = { commitNoteDraftAndClose(closePopup = true) },
                 onDeleteNote = {
+                    haptics.reject()
                     val targetToDelete = activeNotePopupFilename ?: noteDraftName
                     val backupBody = currentNote?.bodyContent ?: noteDraftText
                     undoDeletedNote = targetToDelete to backupBody
@@ -1778,6 +2132,7 @@ fun MainScreen(
                             val (synced, ok) = gcalManager.syncTaskToGoogleCalendar(parsed)
                             withContext(Dispatchers.Main) {
                                 if (ok) {
+                                    haptics.confirm()
                                     persistAndSchedule(
                                         tasks.map { if (it.lineNumber == target.lineNumber) synced else it }
                                     )
@@ -1793,6 +2148,7 @@ fun MainScreen(
                     }
                 },
                 onSave = { reParsed ->
+                    haptics.confirm()
                     undoSnapshot = tasks
                     learnRuleFromSavedTask(reParsed)
                     persistAndSchedule(
@@ -1801,6 +2157,7 @@ fun MainScreen(
                     editingTask = null
                 },
                 onDelete = {
+                    haptics.reject()
                     undoSnapshot = tasks
                     persistAndSchedule(tasks.filterNot { it.lineNumber == target.lineNumber })
                     editingTask = null
@@ -1818,6 +2175,7 @@ fun MainScreen(
                 dismissedInferredTags = dismissedInferredTags,
                 quickTagChips = quickTagChips,
                 showDueDateWheel = showAddDueDateWheel,
+                sessionAddedCount = sessionAddedCount,
                 currentNow = currentNow,
                 fontSizeSp = fontScaleSp,
                 inputFocusRequester = addInputFocusRequester,
@@ -1828,12 +2186,23 @@ fun MainScreen(
                         dismissedInferredTags = emptySet()
                     }
                 },
-                onDismissInferredTag = { dismissedInferredTags = dismissedInferredTags + it },
-                onDisableSpan = { disabledSpans = disabledSpans + it },
+                onDismissInferredTag = {
+                    haptics.tap()
+                    dismissedInferredTags = dismissedInferredTags + it
+                },
+                onDisableSpan = {
+                    haptics.tap()
+                    disabledSpans = disabledSpans + it
+                },
                 onSelectPriority = { addTaskPriority = it },
                 onSetShowDueDateWheel = { showAddDueDateWheel = it },
-                onSubmit = { submitSmartAdd() },
-                onDismiss = { showAddTaskPopup = false }
+                onLaunchVoiceInput = { launchVoiceCapture() },
+                onSubmitAndContinue = { submitSmartAdd(keepOpen = true) },
+                onSubmit = { submitSmartAdd(keepOpen = false) },
+                onDismiss = {
+                    showAddTaskPopup = false
+                    sessionAddedCount = 0
+                }
             )
         }
     }

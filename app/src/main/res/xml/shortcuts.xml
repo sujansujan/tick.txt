@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="quick_add_task"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_quick_add_short"
+        android:shortcutLongLabel="@string/shortcut_quick_add_long">
+        <intent
+            android:action="com.ticktxt.app.ACTION_QUICK_ADD"
+            android:targetPackage="com.ticktxt.app"
+            android:targetClass="com.ticktxt.app.MainActivity" />
+    </shortcut>
+</shortcuts>

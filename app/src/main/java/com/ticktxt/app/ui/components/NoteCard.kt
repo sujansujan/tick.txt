@@ -69,6 +69,33 @@ fun KeepAsciiMarkdownCard(
         }
         val hiddenRowCount = (allWrappedRows.size - visibleRows.size).coerceAtLeast(0)
 
+        val checklistStats = remember(note.bodyContent) {
+            var total = 0
+            var checked = 0
+            for (line in note.bodyContent.lines()) {
+                val m = CHECKBOX_LINE_REGEX.matchEntire(line)
+                if (m != null) {
+                    total++
+                    if (m.groupValues[2].equals("x", ignoreCase = true)) checked++
+                }
+            }
+            total to checked
+        }
+        val rightHeaderBadge = buildString {
+            if (checklistStats.first > 0) {
+                append("${checklistStats.second}/${checklistStats.first}")
+            }
+            if (backlinkCount > 0) {
+                if (isNotEmpty()) append(" ")
+                append("<-$backlinkCount")
+            }
+        }.ifEmpty { null }
+        val rightBadgeColor = when {
+            checklistStats.first > 0 && checklistStats.second == checklistStats.first -> palette.reminder
+            backlinkCount > 0 -> palette.noteLink
+            else -> palette.fgMuted
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -78,8 +105,8 @@ fun KeepAsciiMarkdownCard(
             AsciiTitledTopBorder(
                 badgeText = "# ${note.filename}",
                 badgeColor = palette.project,
-                rightBadgeText = if (backlinkCount > 0) "<-$backlinkCount" else null,
-                rightBadgeColor = palette.noteLink
+                rightBadgeText = rightHeaderBadge,
+                rightBadgeColor = rightBadgeColor
             )
 
             if (visibleRows.isEmpty()) {

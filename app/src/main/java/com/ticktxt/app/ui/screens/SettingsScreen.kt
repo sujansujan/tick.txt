@@ -55,6 +55,8 @@ fun SettingsScreen(
     onPickFolderWithSaf: () -> Unit,
     onReloadFromFolder: () -> Unit = {},
     onOpenSavedFileLocation: () -> Unit,
+    onEditRulesFile: () -> Unit = {},
+    onEditRawTodoFile: () -> Unit = {},
     onArchiveCompletedTasks: () -> Unit,
     onRestoreLatestBackup: () -> Unit = {},
     onFireImmediateNotification: () -> Unit
@@ -206,6 +208,14 @@ fun SettingsScreen(
                     Triple<String, Color, () -> Unit>("[/ Folder]", palette.project) { onPickFolderWithSaf() },
                     Triple<String, Color, () -> Unit>("[~ Reload]", palette.contextTag) { onReloadFromFolder() },
                     Triple<String, Color, () -> Unit>("[> Share]", palette.fg) { onOpenSavedFileLocation() }
+                ),
+                fontSizeSp = (baseSp - 1).coerceAtLeast(12)
+            )
+            AsciiHorizontalBorder(corner = "|")
+            AsciiBoxActionRow(
+                actions = listOf(
+                    Triple<String, Color, () -> Unit>("[~ Edit Rules]", palette.project) { onEditRulesFile() },
+                    Triple<String, Color, () -> Unit>("[# Raw todo.txt]", palette.contextTag) { onEditRawTodoFile() }
                 ),
                 fontSizeSp = (baseSp - 1).coerceAtLeast(12)
             )

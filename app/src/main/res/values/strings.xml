@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">tick.txt</string>
+    <string name="shortcut_quick_add_short">Add Task</string>
+    <string name="shortcut_quick_add_long">Quick add task to tick.txt</string>
+    <string name="widget_description">Plain-text ASCII task list and quick-add box for tick.txt</string>
+    <string name="qs_tile_quick_add">Add tick.txt</string>
+</resources>

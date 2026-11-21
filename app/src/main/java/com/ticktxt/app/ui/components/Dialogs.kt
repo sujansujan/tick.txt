@@ -25,16 +25,22 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ticktxt.app.core.nlp.RecognizedSpan
 import com.ticktxt.app.core.nlp.SmartAddParseResult
+import com.ticktxt.app.core.nlp.SpanCategory
 import com.ticktxt.app.core.notes.NoteFile
 import com.ticktxt.app.core.todotxt.TodoParser
 import com.ticktxt.app.core.todotxt.TodoTask
@@ -46,16 +52,57 @@ import com.ticktxt.app.ui.ascii.AsciiBoxOptionRow
 import com.ticktxt.app.ui.ascii.AsciiHorizontalBorder
 import com.ticktxt.app.ui.ascii.AsciiSnoozeWheelPopup
 import com.ticktxt.app.ui.ascii.AsciiTitledTopBorder
+import com.ticktxt.app.ui.ascii.CHECKBOX_LINE_REGEX
 import com.ticktxt.app.ui.ascii.DUE_TAG_REGEX
 import com.ticktxt.app.ui.ascii.DUETIME_TAG_REGEX
 import com.ticktxt.app.ui.ascii.PlainTextSportsAscii
+import com.ticktxt.app.ui.ascii.rememberTickHaptics
 import com.ticktxt.app.ui.ascii.toggleTagInText
 import com.ticktxt.app.ui.theme.LocalTickPalette
+import com.ticktxt.app.ui.theme.TickSemanticPalette
+import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import java.time.temporal.TemporalAdjusters
 import java.util.Locale
+
+/**
+ * Live inline syntax highlighter for the Smart Add text input:
+ * colorizes recognized dates/times, `+projects`, `@contexts`, reminders, recurrence,
+ * and priority spans right inside the text field while preserving exact cursor offsets.
+ */
+private class SmartAddVisualTransformation(
+    private val spans: List<RecognizedSpan>,
+    private val palette: TickSemanticPalette
+) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val raw = text.text
+        if (raw.isEmpty() || spans.isEmpty()) {
+            return TransformedText(text, OffsetMapping.Identity)
+        }
+        val highlighted = buildAnnotatedString {
+            append(raw)
+            for (span in spans) {
+                val start = span.startIndex.coerceIn(0, raw.length)
+                val end = span.endIndex.coerceIn(start, raw.length)
+                if (end > start) {
+                    val color = when (span.category) {
+                        SpanCategory.DATE_TIME, SpanCategory.DURATION_RANGE -> palette.priorityB
+                        SpanCategory.PROJECT -> palette.project
+                        SpanCategory.CONTEXT, SpanCategory.RECURRENCE -> palette.contextTag
+                        SpanCategory.REMINDER -> palette.reminder
+                        SpanCategory.PRIORITY -> palette.priorityA
+                        SpanCategory.NOTE_MODE -> palette.noteLink
+                    }
+                    addStyle(SpanStyle(color = color, fontWeight = FontWeight.Bold), start, end)
+                }
+            }
+        }
+        return TransformedText(highlighted, OffsetMapping.Identity)
+    }
+}
 
 @Composable
 fun NoteEditorDialog(
@@ -81,6 +128,19 @@ fun NoteEditorDialog(
         if (noteEditMode) noteDraftText.lines()
         else (currentNote?.bodyContent ?: noteDraftText).lines()
     }
+    val statsBadge = remember(displayLines) {
+        val nonEmpty = displayLines.count { it.isNotBlank() }
+        var checksTotal = 0
+        var checksDone = 0
+        for (l in displayLines) {
+            val m = CHECKBOX_LINE_REGEX.matchEntire(l)
+            if (m != null) {
+                checksTotal++
+                if (m.groupValues[2].equals("x", ignoreCase = true)) checksDone++
+            }
+        }
+        if (checksTotal > 0) "${nonEmpty}L $checksDone/$checksTotal" else "${nonEmpty}L"
+    }
 
     Box(
         modifier = Modifier
@@ -105,7 +165,7 @@ fun NoteEditorDialog(
                 .padding(10.dp)
         ) {
             AsciiTitledTopBorder(
-                badgeText = if (isNewNoteDraft) "+ NEW NOTE (.md)" else "/ NOTE (.md)",
+                badgeText = if (isNewNoteDraft) "+ NEW NOTE (.md)" else "/ NOTE ($statsBadge)",
                 borderColor = palette.project,
                 badgeColor = palette.project,
                 rightBadgeText = "X Close",
@@ -315,6 +375,108 @@ fun NoteEditorDialog(
     }
 }
 
+/**
+ * Reusable pure-ASCII plain-text editor modal for inspecting/editing `tick.rules.txt`
+ * or raw `todo.txt` directly inside the app.
+ */
+@Composable
+fun RawTextEditorDialog(
+    titleBadge: String,
+    subtitleHint: String,
+    draftText: String,
+    fontSizeSp: Int,
+    onDraftChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val palette = LocalTickPalette.current
+    val monoFont = FontFamily.Monospace
+    val lineCount = remember(draftText) { draftText.lines().size }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.scrim)
+            .imePadding()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onDismiss() }
+            .padding(horizontal = 12.dp, vertical = 20.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(palette.bgSurface)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {}
+                .padding(10.dp)
+        ) {
+            AsciiTitledTopBorder(
+                badgeText = titleBadge,
+                borderColor = palette.contextTag,
+                badgeColor = palette.contextTag,
+                rightBadgeText = "${lineCount}L",
+                rightBadgeColor = palette.fgMuted
+            )
+            AsciiBoxBodyRow(
+                text = subtitleHint,
+                textColor = palette.fgMuted,
+                fontSizeSp = (fontSizeSp - 3).coerceAtLeast(11),
+                singleLine = true
+            )
+            AsciiHorizontalBorder(corner = "|")
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 200.dp, max = 380.dp)
+            ) {
+                Text(
+                    text = "| ",
+                    color = palette.border,
+                    fontSize = 12.sp,
+                    fontFamily = monoFont
+                )
+                BasicTextField(
+                    value = draftText,
+                    onValueChange = onDraftChange,
+                    textStyle = TextStyle(
+                        fontFamily = monoFont,
+                        color = palette.fg,
+                        fontSize = (fontSizeSp - 2).coerceAtLeast(12).sp,
+                        lineHeight = (fontSizeSp + 2).sp
+                    ),
+                    cursorBrush = SolidColor(palette.contextTag),
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 6.dp)
+                        .verticalScroll(rememberScrollState())
+                )
+                Text(
+                    text = " |",
+                    color = palette.border,
+                    fontSize = 12.sp,
+                    fontFamily = monoFont
+                )
+            }
+
+            AsciiHorizontalBorder(corner = "|")
+            AsciiBoxActionRow(
+                actions = listOf(
+                    Triple("[X Cancel]", palette.fgMuted, onDismiss),
+                    Triple("[+ Save File]", palette.reminder, onSave)
+                ),
+                fontSizeSp = fontSizeSp
+            )
+            AsciiHorizontalBorder()
+        }
+    }
+}
+
 @Composable
 fun TagsFilterDialog(
     dynamicProjects: List<String>,
@@ -426,16 +588,32 @@ fun EditTaskDialog(
         TodoParser.parseLine(editingTaskDraft, target.lineNumber)
     }
     val isTargetGcalSynced = parsedDraft.getTagValue("gcal") != null
+    val today = currentNow.toLocalDate()
     val targetDt = remember(parsedDraft.dueDate, parsedDraft.dueTime, currentNow) {
-        val d = parsedDraft.dueDate ?: currentNow.toLocalDate()
+        val d = parsedDraft.dueDate ?: today
         val t = parsedDraft.dueTime ?: LocalTime.of(9, 0)
         LocalDateTime.of(d, t)
     }
     val deltaStr = remember(targetDt, currentNow) {
         PlainTextSportsAscii.formatRelativeDelta(currentNow, targetDt)
     }
-    val formattedDateLine = remember(targetDt) {
-        targetDt.format(DateTimeFormatter.ofPattern("EEE, d MMM HH:mm", Locale.ENGLISH))
+    val formattedDateLine = remember(parsedDraft.dueDate, targetDt) {
+        if (parsedDraft.dueDate == null) "No due date"
+        else targetDt.format(DateTimeFormatter.ofPattern("EEE, d MMM HH:mm", Locale.ENGLISH))
+    }
+
+    fun applyQuickDueDate(newDate: LocalDate?) {
+        var updated = TodoParser.parseLine(editingTaskDraft, target.lineNumber)
+        if (newDate == null) {
+            updated = TodoParser.withUpdatedTag(updated, "due", null)
+            updated = TodoParser.withUpdatedTag(updated, "duetime", null)
+        } else {
+            updated = TodoParser.withUpdatedTag(updated, "due", newDate.toString())
+            if (updated.reminderSpecs.isEmpty()) {
+                updated = TodoParser.withReplacedMultiTag(updated, "rem", listOf(defaultTimedReminder))
+            }
+        }
+        onDraftChange(TodoParser.serializeLine(updated))
     }
 
     if (showDueDateWheel) {
@@ -558,9 +736,33 @@ fun EditTaskDialog(
                 )
                 AsciiHorizontalBorder(corner = "|")
 
+                // 1-Tap Quick-Reschedule Strip
+                AsciiBoxActionRow(
+                    actions = listOf(
+                        Triple("[Today]", if (parsedDraft.dueDate == today) palette.reminder else palette.fg) {
+                            applyQuickDueDate(today)
+                        },
+                        Triple("[Tmrw]", if (parsedDraft.dueDate == today.plusDays(1)) palette.reminder else palette.fg) {
+                            applyQuickDueDate(today.plusDays(1))
+                        },
+                        Triple("[+1d]", palette.priorityB) {
+                            val base = parsedDraft.dueDate?.takeIf { !it.isBefore(today) } ?: today
+                            applyQuickDueDate(base.plusDays(1))
+                        },
+                        Triple("[Mon]", palette.contextTag) {
+                            applyQuickDueDate(today.with(TemporalAdjusters.next(DayOfWeek.MONDAY)))
+                        },
+                        Triple("[Clear]", palette.fgMuted) {
+                            applyQuickDueDate(null)
+                        }
+                    ),
+                    fontSizeSp = (fontSizeSp - 2).coerceAtLeast(11)
+                )
+                AsciiHorizontalBorder(corner = "|")
+
                 AsciiBoxLeftRightRow(
                     left = "DUE: $formattedDateLine",
-                    right = "$deltaStr [@ Pick Due]",
+                    right = if (parsedDraft.dueDate != null) "$deltaStr [@ Wheel]" else "[@ Pick Due]",
                     leftColor = palette.fg,
                     rightColor = palette.reminder,
                     fontSizeSp = fontSizeSp,
@@ -597,6 +799,7 @@ fun AddTaskDialog(
     dismissedInferredTags: Set<String>,
     quickTagChips: List<String>,
     showDueDateWheel: Boolean,
+    sessionAddedCount: Int = 0,
     currentNow: LocalDateTime,
     fontSizeSp: Int,
     inputFocusRequester: FocusRequester,
@@ -605,11 +808,18 @@ fun AddTaskDialog(
     onDisableSpan: (String) -> Unit,
     onSelectPriority: (Char?) -> Unit,
     onSetShowDueDateWheel: (Boolean) -> Unit,
+    onLaunchVoiceInput: () -> Unit = {},
+    onSubmitAndContinue: () -> Unit = {},
     onSubmit: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val palette = LocalTickPalette.current
+    val haptics = rememberTickHaptics()
     val monoFont = FontFamily.Monospace
+
+    val inlineHighlightTransform = remember(parsePreview?.recognizedSpans, palette) {
+        SmartAddVisualTransformation(parsePreview?.recognizedSpans.orEmpty(), palette)
+    }
 
     if (showDueDateWheel) {
         AsciiSnoozeWheelPopup(
@@ -655,7 +865,7 @@ fun AddTaskDialog(
                     .padding(10.dp)
             ) {
                 AsciiTitledTopBorder(
-                    badgeText = "+ ADD TASK",
+                    badgeText = if (sessionAddedCount > 0) "+ ADD TASK (+$sessionAddedCount)" else "+ ADD TASK",
                     borderColor = palette.reminder,
                     badgeColor = palette.reminder,
                     rightBadgeText = "X Close",
@@ -692,6 +902,7 @@ fun AddTaskDialog(
                             value = smartInput,
                             onValueChange = onSmartInputChange,
                             singleLine = true,
+                            visualTransformation = inlineHighlightTransform,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                             keyboardActions = KeyboardActions(onDone = { onSubmit() }),
                             textStyle = TextStyle(
@@ -705,6 +916,19 @@ fun AddTaskDialog(
                                 .focusRequester(inputFocusRequester)
                         )
                     }
+                    Text(
+                        text = "[Mic]",
+                        color = palette.contextTag,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        fontFamily = monoFont,
+                        modifier = Modifier
+                            .clickable {
+                                haptics.tap()
+                                onLaunchVoiceInput()
+                            }
+                            .padding(horizontal = 6.dp, vertical = 6.dp)
+                    )
                     Text(
                         text = " |",
                         color = palette.border,
@@ -811,6 +1035,23 @@ fun AddTaskDialog(
                     )
                 }
 
+                // Subtle reason hint showing WHY the offline engine suggested/inferred tags
+                val suggestionReasonLine = remember(parsePreview, dismissedInferredTags) {
+                    val reasons = parsePreview?.suggestedTags
+                        ?.filter { it.tag !in dismissedInferredTags && it.reason.isNotEmpty() }
+                        ?.take(3)
+                        ?.joinToString("  ") { "${it.tag} (${it.reason})" }
+                    reasons?.takeIf { it.isNotEmpty() }
+                }
+                if (suggestionReasonLine != null) {
+                    AsciiBoxBodyRow(
+                        text = "why: $suggestionReasonLine",
+                        textColor = palette.fgMuted,
+                        fontSizeSp = (fontSizeSp - 3).coerceAtLeast(10),
+                        singleLine = true
+                    )
+                }
+
                 // Dynamically ranked runner-up suggestions from TagSuggestionEngine + fallback quickTagChips
                 val smartSuggestedTags = remember(parsePreview, quickTagChips, dismissedInferredTags) {
                     val alreadyActive = buildSet {
@@ -881,6 +1122,7 @@ fun AddTaskDialog(
                 AsciiBoxActionRow(
                     actions = listOf(
                         Triple("[X Close]", palette.fgMuted, onDismiss),
+                        Triple("[+ Next]", palette.contextTag, onSubmitAndContinue),
                         Triple("[+ Add]", palette.reminder, onSubmit)
                     ),
                     fontSizeSp = fontSizeSp

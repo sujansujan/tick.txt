@@ -857,7 +857,7 @@ fun MainScreen(
     }
 
     // Build sectioned Open list (Overdue / Today / Upcoming / Someday) with zero extra tabs
-    val taskListEntries = remember(filteredTasks, activeFilter, searchQuery, currentNow, palette) {
+    val taskListEntries: List<TaskListEntry> = remember(filteredTasks, activeFilter, searchQuery, currentNow, palette) {
         if (activeFilter != "open" || searchQuery.isNotBlank() || filteredTasks.isEmpty()) {
             filteredTasks.map { TaskListEntry.TaskRow(it) }
         } else {
@@ -881,7 +881,7 @@ fun MainScreen(
             if (nonEmptyBuckets <= 1 && overdue.isEmpty()) {
                 filteredTasks.map { TaskListEntry.TaskRow(it) }
             } else {
-                buildList {
+                buildList<TaskListEntry> {
                     if (overdue.isNotEmpty()) {
                         add(TaskListEntry.SectionHeader("overdue", "! OVERDUE (${overdue.size})", palette.priorityA))
                         overdue.forEach { add(TaskListEntry.TaskRow(it)) }

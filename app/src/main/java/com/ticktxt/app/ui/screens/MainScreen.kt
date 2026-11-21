@@ -337,8 +337,8 @@ fun MainScreen(
         )
     }
 
-    fun learnRuleFromSavedTask(task: TodoTask) {
-        val updatedRules = RulesEngine.learnFromTask(rulesText, task)
+    fun learnRuleFromSavedTask(task: TodoTask, dismissed: Set<String> = emptySet()) {
+        val updatedRules = RulesEngine.learnFromTask(rulesText, task, dismissed)
         if (updatedRules != rulesText) {
             rulesText = updatedRules
             coroutineScope.launch(Dispatchers.IO) {
@@ -678,7 +678,7 @@ fun MainScreen(
                 }
                 fallback
             }
-            learnRuleFromSavedTask(newTask)
+            learnRuleFromSavedTask(newTask, dismissedInferredTags)
             val updatedList = tasks + newTask
             persistAndSchedule(
                 updatedList,

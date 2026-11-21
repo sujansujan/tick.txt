@@ -25,10 +25,13 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ticktxt.app.core.nlp.SmartAddParseResult
@@ -36,6 +39,7 @@ import com.ticktxt.app.core.notes.NoteFile
 import com.ticktxt.app.core.todotxt.TodoParser
 import com.ticktxt.app.core.todotxt.TodoTask
 import com.ticktxt.app.ui.ascii.AsciiBoxActionRow
+import com.ticktxt.app.ui.ascii.AsciiBoxAnnotatedBodyRow
 import com.ticktxt.app.ui.ascii.AsciiBoxBodyRow
 import com.ticktxt.app.ui.ascii.AsciiBoxLeftRightRow
 import com.ticktxt.app.ui.ascii.AsciiBoxOptionRow
@@ -677,7 +681,7 @@ fun AddTaskDialog(
                     ) {
                         if (smartInput.isEmpty()) {
                             Text(
-                                text = "pay rent tomorrow 9am +home @phone...",
+                                text = "submit report fri by 5 +work...",
                                 color = palette.fgMuted,
                                 fontSize = 13.sp,
                                 fontFamily = monoFont,
@@ -706,6 +710,67 @@ fun AddTaskDialog(
                         color = palette.border,
                         fontSize = 12.sp,
                         fontFamily = monoFont
+                    )
+                }
+
+                // Live ASCII Schedule Preview: shows exact parsed date/time/recurrence/defer/reminder in real time
+                val liveScheduleSummary = remember(parsePreview, palette) {
+                    if (parsePreview == null || parsePreview.isNoteCapture) null
+                    else {
+                        val hasSchedule = parsePreview.dueDate != null ||
+                            parsePreview.dueTime != null ||
+                            parsePreview.thresholdDate != null ||
+                            parsePreview.recurrence != null ||
+                            parsePreview.durationMinutes != null
+                        if (!hasSchedule) null
+                        else {
+                            val dateFmt = DateTimeFormatter.ofPattern("EEE, d MMM", Locale.ENGLISH)
+                            buildAnnotatedString {
+                                withStyle(SpanStyle(color = palette.fgMuted, fontWeight = FontWeight.Bold)) {
+                                    append("= ")
+                                }
+                                var needsSep = false
+                                if (parsePreview.dueDate != null) {
+                                    withStyle(SpanStyle(color = palette.priorityB, fontWeight = FontWeight.Bold)) {
+                                        append(parsePreview.dueDate.format(dateFmt))
+                                    }
+                                    if (parsePreview.dueTime != null) {
+                                        withStyle(SpanStyle(color = palette.reminder, fontWeight = FontWeight.Bold)) {
+                                            append(" %02d:%02d".format(parsePreview.dueTime.hour, parsePreview.dueTime.minute))
+                                        }
+                                    }
+                                    needsSep = true
+                                }
+                                parsePreview.durationMinutes?.let { dur ->
+                                    if (needsSep) withStyle(SpanStyle(color = palette.border)) { append(" | ") }
+                                    withStyle(SpanStyle(color = palette.contextTag)) { append("${dur}m") }
+                                    needsSep = true
+                                }
+                                parsePreview.recurrence?.let { rec ->
+                                    if (needsSep) withStyle(SpanStyle(color = palette.border)) { append(" | ") }
+                                    withStyle(SpanStyle(color = palette.contextTag, fontWeight = FontWeight.Bold)) { append("rec:$rec") }
+                                    needsSep = true
+                                }
+                                parsePreview.thresholdDate?.let { deferDate ->
+                                    if (needsSep) withStyle(SpanStyle(color = palette.border)) { append(" | ") }
+                                    withStyle(SpanStyle(color = palette.fgMuted)) { append("t:$deferDate") }
+                                    needsSep = true
+                                }
+                                parsePreview.reminders.firstOrNull()?.let { rem ->
+                                    if (needsSep) withStyle(SpanStyle(color = palette.border)) { append(" | ") }
+                                    withStyle(SpanStyle(color = palette.reminder)) { append("rem:$rem") }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (liveScheduleSummary != null) {
+                    AsciiHorizontalBorder(corner = "|")
+                    AsciiBoxAnnotatedBodyRow(
+                        annotatedText = liveScheduleSummary,
+                        fontSizeSp = (fontSizeSp - 2).coerceAtLeast(11),
+                        singleLine = true
                     )
                 }
 
@@ -746,11 +811,28 @@ fun AddTaskDialog(
                     )
                 }
 
-                if (quickTagChips.isNotEmpty()) {
+                // Dynamically ranked runner-up suggestions from TagSuggestionEngine + fallback quickTagChips
+                val smartSuggestedTags = remember(parsePreview, quickTagChips, dismissedInferredTags) {
+                    val alreadyActive = buildSet {
+                        parsePreview?.projects?.forEach { add("+$it") }
+                        parsePreview?.contexts?.forEach { add("@$it") }
+                    }
+                    val ranked = parsePreview?.suggestedTags
+                        ?.filter { !it.autoApplied && it.tag !in alreadyActive && it.tag !in dismissedInferredTags }
+                        ?.map { it.tag }
+                        .orEmpty()
+                    val fallback = quickTagChips.filter { it !in alreadyActive && it !in ranked }
+                    (ranked + fallback).distinct().take(8)
+                }
+                val hasDynamicSuggestions = remember(parsePreview, dismissedInferredTags) {
+                    parsePreview?.suggestedTags?.any { !it.autoApplied && it.tag !in dismissedInferredTags } == true
+                }
+
+                if (smartSuggestedTags.isNotEmpty()) {
                     AsciiHorizontalBorder(corner = "|")
                     AsciiBoxOptionRow(
-                        label = "[+@ Tag]",
-                        options = quickTagChips.map { it to it },
+                        label = if (hasDynamicSuggestions) "Suggest" else "[+@ Tag]",
+                        options = smartSuggestedTags.map { it to it },
                         selectedValue = "",
                         onSelect = { tag -> onSmartInputChange(toggleTagInText(smartInput, tag)) },
                         activeColor = palette.project,

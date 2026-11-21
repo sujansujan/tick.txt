@@ -1,7 +1,9 @@
 package com.ticktxt.app
 
+import com.ticktxt.app.core.nlp.RulesEngine
 import com.ticktxt.app.core.nlp.SmartAddParser
 import com.ticktxt.app.core.nlp.TickRulesConfig
+import com.ticktxt.app.core.todotxt.TodoParser
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.time.LocalDate
@@ -12,6 +14,8 @@ class SmartAddParserTest {
 
     // Reference anchor: Sunday, 2026-11-01 at 19:04
     private val anchorNow = LocalDateTime.of(2026, 11, 1, 19, 4)
+    // Morning reference anchor: Sunday, 2026-11-01 at 10:00
+    private val morningAnchor = LocalDateTime.of(2026, 11, 1, 10, 0)
     private val rules = TickRulesConfig()
 
     @Test
@@ -107,5 +111,143 @@ class SmartAddParserTest {
         val alarmRec = SmartAddParser.parse("take vitamins every day alarm at 7am", anchorNow, rules)
         assertEquals("1d", alarmRec.recurrence)
         assertEquals(listOf("07:00/a"), alarmRec.reminders)
+    }
+
+    @Test
+    fun `parses colloquial, meridiem-less, dotted, compact, and spoken clock times naturally`() {
+        // Bare hour after preposition: "by 5" -> 17:00 today
+        val r1 = SmartAddParser.parse("submit report by 5", morningAnchor, rules)
+        assertEquals("submit report", r1.strippedTitle)
+        assertEquals(LocalDate.of(2026, 11, 1), r1.dueDate)
+        assertEquals(LocalTime.of(17, 0), r1.dueTime)
+        assertEquals(listOf("work"), r1.projects)
+
+        // Compact 930am + abbreviation tmr
+        val r2 = SmartAddParser.parse("standup tmr 930am", anchorNow, rules)
+        assertEquals("standup", r2.strippedTitle)
+        assertEquals(LocalDate.of(2026, 11, 2), r2.dueDate)
+        assertEquals(LocalTime.of(9, 30), r2.dueTime)
+        assertEquals(listOf("work"), r2.projects)
+
+        // Dotted shorthand + single-letter meridiem ("9.30a")
+        val r3 = SmartAddParser.parse("call mom 9.30a", morningAnchor, rules)
+        assertEquals(LocalTime.of(9, 30), r3.dueTime)
+        assertEquals(listOf("family"), r3.projects)
+        assertEquals(listOf("phone"), r3.contexts)
+
+        // Spoken "half past 2" on a weekday
+        val r4 = SmartAddParser.parse("dentist fri half past 2", morningAnchor, rules)
+        assertEquals(LocalDate.of(2026, 11, 6), r4.dueDate)
+        assertEquals(LocalTime.of(14, 30), r4.dueTime)
+        assertEquals(listOf("health"), r4.projects)
+
+        // Spoken "quarter to 8" + tmrw
+        val r5 = SmartAddParser.parse("leave house quarter to 8 tmrw", anchorNow, rules)
+        assertEquals(LocalDate.of(2026, 11, 2), r5.dueDate)
+        assertEquals(LocalTime.of(7, 45), r5.dueTime)
+
+        // Period hint overrides smart AM/PM: "tomorrow morning at 6" -> 06:00 (not 18:00)
+        val r6 = SmartAddParser.parse("gym tomorrow morning at 6", LocalDateTime.of(2026, 11, 1, 14, 0), rules)
+        assertEquals(LocalDate.of(2026, 11, 2), r6.dueDate)
+        assertEquals(LocalTime.of(6, 0), r6.dueTime)
+        assertEquals(listOf("health"), r6.projects)
+
+        // Period hint "tonight" resolves "at 8" -> 20:00
+        val r7 = SmartAddParser.parse("call mom at 8 tonight", LocalDateTime.of(2026, 11, 1, 14, 0), rules)
+        assertEquals(LocalDate.of(2026, 11, 1), r7.dueDate)
+        assertEquals(LocalTime.of(20, 0), r7.dueTime)
+
+        // Military 4-digit time ("at 1430")
+        val r8 = SmartAddParser.parse("call supplier at 1430", morningAnchor, rules)
+        assertEquals(LocalTime.of(14, 30), r8.dueTime)
+        assertEquals(listOf("phone"), r8.contexts)
+    }
+
+    @Test
+    fun `parses workday milestones, spoken offsets, numeric dates, and defer dates without false positives`() {
+        val eod = SmartAddParser.parse("submit taxes eod", morningAnchor, rules)
+        assertEquals(LocalDate.of(2026, 11, 1), eod.dueDate)
+        assertEquals(LocalTime.of(17, 0), eod.dueTime)
+        assertEquals(listOf("finance"), eod.projects)
+
+        val eow = SmartAddParser.parse("ship release by eow", morningAnchor, rules)
+        assertEquals(LocalDate.of(2026, 11, 6), eow.dueDate)
+        assertEquals(LocalTime.of(17, 0), eow.dueTime)
+        assertEquals(listOf("work"), eow.projects)
+
+        val afterWork = SmartAddParser.parse("buy oat milk after work", morningAnchor, rules)
+        assertEquals(LocalDate.of(2026, 11, 1), afterWork.dueDate)
+        assertEquals(LocalTime.of(18, 0), afterWork.dueTime)
+        assertEquals(listOf("groceries"), afterWork.projects)
+        assertEquals(listOf("errands"), afterWork.contexts)
+
+        val halfHr = SmartAddParser.parse("stretch in half an hour", morningAnchor, rules)
+        assertEquals(LocalTime.of(10, 30), halfHr.dueTime)
+        assertEquals(listOf("0m/n"), halfHr.reminders)
+
+        val wordOffset = SmartAddParser.parse("check laundry in two hours", morningAnchor, rules)
+        assertEquals(LocalTime.of(12, 0), wordOffset.dueTime)
+
+        val dmy = SmartAddParser.parse("renew passport 25/11", morningAnchor, rules)
+        assertEquals(LocalDate.of(2026, 11, 25), dmy.dueDate)
+        assertEquals(listOf("travel"), dmy.projects)
+
+        val mdy = SmartAddParser.parse("meeting 11/25 at 3", morningAnchor, rules)
+        assertEquals(LocalDate.of(2026, 11, 25), mdy.dueDate)
+        assertEquals(LocalTime.of(15, 0), mdy.dueTime)
+
+        val defer = SmartAddParser.parse("pay rent starting next monday", anchorNow, rules)
+        assertEquals(LocalDate.of(2026, 11, 2), defer.thresholdDate)
+        assertEquals(listOf("finance"), defer.projects)
+
+        // False-positive guard: "call Tom at 3" keeps "Tom" in title, and "buy 5 apples" doesn't parse 5 as time
+        val callTom = SmartAddParser.parse("call Tom at 3", morningAnchor, rules)
+        assertEquals("call Tom", callTom.strippedTitle)
+        assertEquals(LocalDate.of(2026, 11, 1), callTom.dueDate)
+        assertEquals(LocalTime.of(15, 0), callTom.dueTime)
+
+        val apples = SmartAddParser.parse("buy 5 apples", morningAnchor, rules)
+        assertNull(apples.dueDate)
+        assertNull(apples.dueTime)
+        assertEquals(listOf("errands"), apples.contexts)
+    }
+
+    @Test
+    fun `suggests projects and contexts via stemming, fuzzy typo match, statistical history, and cross-tag affinity`() {
+        // Stemming ("invoices" -> "invoice" -> +work) + weekday/period ("tmrw morning")
+        val stemmed = SmartAddParser.parse("email Alex about invoices tmrw morning", anchorNow, rules)
+        assertEquals(LocalDate.of(2026, 11, 2), stemmed.dueDate)
+        assertEquals(LocalTime.of(9, 0), stemmed.dueTime)
+        assertEquals(listOf("work"), stemmed.projects)
+        assertEquals(listOf("email"), stemmed.contexts)
+
+        // Fuzzy typo matching ("grocries" -> known +groceries)
+        val fuzzyRules = rules.copy(knownProjects = setOf("groceries", "architecture"))
+        val fuzzy = SmartAddParser.parse("buy grocries", morningAnchor, fuzzyRules)
+        assertEquals(listOf("groceries"), fuzzy.projects)
+        assertEquals(listOf("errands"), fuzzy.contexts)
+
+        // Weighted statistical history + cross-tag affinity
+        val historyTasks = listOf(
+            TodoParser.parseLine("2026-10-20 deploy api service +backend @desk", 1),
+            TodoParser.parseLine("2026-10-22 fix api auth +backend @desk", 2),
+            TodoParser.parseLine("2026-10-25 benchmark api latency +backend @desk", 3)
+        )
+        val learnedRules = RulesEngine.withHistoricalLearning(rules, historyTasks, emptyList())
+        val inferredFromHistory = SmartAddParser.parse("profile api", morningAnchor, learnedRules)
+        assertEquals(listOf("backend"), inferredFromHistory.projects)
+        assertEquals(listOf("desk"), inferredFromHistory.contexts)
+
+        // Junk-project guard: vague pronouns/nouns never create bogus +everything / +stuff projects
+        val noJunk1 = SmartAddParser.parse("finish everything tomorrow", morningAnchor, rules)
+        assertTrue(noJunk1.projects.isEmpty())
+        val noJunk2 = SmartAddParser.parse("fix stuff", morningAnchor, rules)
+        assertTrue(noJunk2.projects.isEmpty())
+
+        // Multi-candidate runner-up suggestions: "pay dentist bill" surfaces both +health and +finance
+        val multi = SmartAddParser.parse("pay dentist bill", morningAnchor, rules)
+        val allSuggestedTagNames = multi.suggestedTags.map { it.tag }
+        assertTrue("+health" in allSuggestedTagNames)
+        assertTrue("+finance" in allSuggestedTagNames)
     }
 }

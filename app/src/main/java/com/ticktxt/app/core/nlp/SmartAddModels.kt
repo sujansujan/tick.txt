@@ -14,6 +14,19 @@ enum class SpanCategory {
     NOTE_MODE
 }
 
+enum class TagKind {
+    PROJECT,
+    CONTEXT
+}
+
+data class TagSuggestion(
+    val tag: String,           // e.g. "+work", "@phone"
+    val kind: TagKind,
+    val score: Double,         // 0.0 .. 1.0+ calibrated confidence
+    val reason: String,        // concise explanation e.g. "rule:invoice", "history:3x", "verb:call"
+    val autoApplied: Boolean
+)
+
 data class RecognizedSpan(
     val id: String,
     val startIndex: Int,
@@ -43,5 +56,6 @@ data class SmartAddParseResult(
     val suppressReminder: Boolean = false,
     val passthroughTags: List<String> = emptyList(),
     val recognizedSpans: List<RecognizedSpan> = emptyList(),
+    val suggestedTags: List<TagSuggestion> = emptyList(),
     val formattedTodoLine: String
 )
